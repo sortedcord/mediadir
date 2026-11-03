@@ -246,6 +246,125 @@ A relation is a named group of items of a free-form `type` (`collection`, `album
 - **RelationDetail** = RelationSummary + `members: [{item_id, ord, role, item: ItemSummary}]`, ordered by `ord` then title.
 - **ItemDetail** has `relations: [RelationSummary + ord, role]` (this item's position).
 
+## Analytics
+Data endpoints only (no UI). Storage, retention and env vars: [STORAGE.md](STORAGE.md#analytics-storage).
+All `GET`, JSON, timestamps are unix **seconds** (UTC) in requests and responses. Errors as elsewhere (`{ "error" }`, `400`/`404`).
+
+### Identity
+The server has no auth. Clients identify themselves with `X-MediaDir-Device: <stable per-install id>` and
+optionally `X-MediaDir-User: <display name>` (each max 128 chars). Media players that cannot set headers may
+use `?device=` / `?user=` on the URL instead (the header wins if both are present). Android's ExoPlayer
+(`DefaultHttpDataSource.Factory().setDefaultRequestProperties(...)`) can set headers; both forms work.
+Missing device -> `anon:<client ip>`. The latest `User-Agent` and client IP are remembered per device.
+
+### What is recorded
+- **Library snapshots**: at startup and every `ANALYTICS_SNAPSHOT_SECS`.
+- **Requests** (everything except `/api/analytics/*`): `ts`, `group` (`stream|asset|frame|api|other`), `route` (template such
+  as `/api/items/{id}`, `/stream/{file_id}`; unrouted = `(unmatched)`), method, status, **response bytes actually sent**
+  (Range partials and client aborts counted as streamed), duration in ms (until the body finished or the client went away),
+  device, user, `item_id` / `file_id` when the route has one.
+- **Playback sessions**, keyed by (device, file): *inferred* from `GET /stream/{file_id}` (200/206): opens on the first
+  request, extends while requests continue (an open connection keeps it alive), closes after `ANALYTICS_PLAYBACK_IDLE_SECS`
+  without activity. `bytes` = bytes sent; `watched_s` = union of served byte ranges x duration / size; `max_position_s` = furthest
+  served byte x duration / size (short reads in the last 10% of the file, container index probes, are ignored for position/watch time).
+  *Explicit* events (`POST /api/analytics/playback`) take precedence for the session they touch: `watched_s`, `position_s` and
+  `max_position_s` then come from the reported positions (`inferred_watched_s` keeps the byte-based estimate).
+- **Device sessions**, keyed by device: open at the first request, close after `ANALYTICS_DEVICE_IDLE_SECS` of inactivity.
+
+### Endpoints
+| Method | Path | Notes |
+|---|---|---|
+| GET | `/api/analytics/overview` | current totals |
+| GET | `/api/analytics/library` | `from, to, bucket=hour\|day\|week\|month (default day)`; default range: last 30 days |
+| GET | `/api/analytics/traffic` | `from, to, bucket (default hour), group_by=route\|group\|device\|user\|status\|none (default none)`; default range: last 7 days |
+| GET | `/api/analytics/sessions` | `type=playback\|device (default playback), active=true\|false, device, user, from, to, limit=50 (max 500), offset` |
+| GET | `/api/analytics/sessions/{id}` | one session (`pb_…` playback, `dv_…` device); playback adds `ranges` |
+| GET | `/api/analytics/now-playing` | active playback sessions |
+| GET | `/api/analytics/top` | `metric=plays\|bytes\|watch_time (default plays), by=item\|user\|device\|kind (default item), from, to, limit=10 (max 200)`; default range: last 30 days |
+| GET | `/api/analytics/users` · `/api/analytics/devices` | everything seen so far |
+| POST | `/api/analytics/playback` | explicit playback event |
+
+Buckets are UTC; weeks start Monday; months are calendar months. `from`/`to` are `[from, to)`; `from >= to` -> `400`.
+
+**`GET /overview`**
+```json
+{ "ts": 1700000000,
+  "library": { …a snapshot, see below, computed live… },
+  "traffic": { "last_24h": { "requests": 10, "bytes": 123, "by_group": { "stream": { "requests": 2, "bytes": 100 }, "api": { … } } },
+               "last_7d": { … }, "last_30d": { … } },
+  "playback": { "plays_24h": 3, "watch_time_s_24h": 5400.5 },
+  "active": { "playback_sessions": 1, "device_sessions": 2 },
+  "devices": 4, "users": 3, "last_snapshot_at": 1699999000, "dropped_events": 0 }
+```
+
+**Snapshot** (`overview.library`, and each `library.series[]` point, which also has `t` = bucket start and `ts` = snapshot time):
+```json
+{ "items": { "total": 120, "by_kind": { "movie": 40, "episode": 60 } },
+  "files": { "count": 70, "bytes": 123456789,
+             "by_container": { "matroska": { "count": 3, "bytes": 99 } }, "by_mime": { "video/mp4": { "count": 2, "bytes": 9 } },
+             "by_location": { "store": { "count": 60, "bytes": 1 }, "external": { … } },
+             "by_hash_state": { "full": { "count": 69, "bytes": 1 }, "pending": { … } } },
+  "assets": { "count": 10, "bytes": 5000 }, "people": 30,
+  "relations": { "count": 4, "members": 12 }, "field_defs": 14,
+  "ingest": { "queue": 0, "settling": 0, "active": 0, "problems": 0, "pending_hashes": 0, "records_by_state": { "done": 70 } },
+  "disks": { "data": { "path": "…", "total_bytes": 1, "free_bytes": 1, "avail_bytes": 1, "used_bytes": 1 }, "media": { … }, "assets": { … }, "external": { … only when EXTERNAL_ROOT is set } } }
+```
+
+**`GET /library`** -> `{ "from", "to", "bucket", "series": [ Snapshot + {t, ts} ] }` ordered by `t`; the last snapshot of each bucket.
+
+**`GET /traffic`**
+```json
+{ "from": 1, "to": 2, "bucket": "hour", "group_by": "route", "totals": { "requests": 12, "bytes": 3400 },
+  "rows": [ { "t": 1700000000, "key": { "group": "stream", "route": "/stream/{file_id}" },
+              "requests": 3, "bytes": 3000, "avg_ms": 12.5, "p50_ms": 10, "p95_ms": 30, "source": "raw" } ] }
+```
+`key` is `null` for `none`, else an object: `route` -> `{group, route}`, `group` -> `{group}`, `device` -> `{device}`, `user` -> `{user}`
+(`null` = no user), `status` -> `{status: "2xx"}`. Rows are sorted by `t`, then key. `source` is `raw` (from the request log; percentiles
+are nearest-rank over durations), `aggregate` (older than `ANALYTICS_RAW_DAYS`: hour-granular, `p50_ms`/`p95_ms` are `null`) or `mixed`
+(`p50_ms`/`p95_ms` `null`).
+
+**Sessions** (`GET /sessions` -> `{ "type", "total", "limit", "offset", "sessions": [ … ] }`, newest first; `/sessions/{id}` -> one object):
+```json
+{ "id": "pb_0123456789abcdef", "type": "playback", "device": "pixel-7", "user": "Alice",
+  "file_id": "…", "item_id": "…", "item_kind": "movie",
+  "item": { "id": "…", "kind": "episode", "title": "Pilot", "subtitle": null, "year": null, "index": 1, "parent_index": 1,
+            "parent_id": "…", "parents": [ { "id": "…", "kind": "season", "title": "Season 1" }, { "id": "…", "kind": "show", "title": "Show" } ] },
+  "started_at": 1, "last_at": 2, "ended_at": null, "active": true,
+  "source": "inferred", "state": "playing",
+  "bytes": 123, "requests": 2, "watched_s": 12.3, "inferred_watched_s": 12.3, "max_position_s": 12.3, "position_s": 12.3,
+  "duration_s": 5400.0, "file_size": 123456 }
+```
+`item` is `null` if the item was deleted. `source` is `inferred` or `explicit`; `state` is `playing | paused | stopped`. Only
+`/sessions/{id}` adds `"ranges": [[start, end], …]` (merged served byte ranges). Device sessions:
+`{ id: "dv_…", type: "device", device, user, started_at, last_at, ended_at, active, requests, bytes }`. `from`/`to` select sessions
+overlapping `[from, to)`.
+
+**`GET /now-playing`** -> `{ "ts", "total", "sessions": [ { "session_id", "user", "device", "item", "item_id", "file_id", "state", "source",
+"position_s", "duration_s", "started_at", "last_at", "watched_s", "bytes" } ] }` (`item` as above). For inferred sessions `position_s`
+is the end of the last served range converted to seconds.
+
+**`GET /top`** -> `{ "metric", "by", "from", "to", "rows": [ { "key", "value", "plays", "bytes", "watch_time_s" } ] }` sorted by the chosen
+metric (`value` repeats it). `key` is the item id / user name / device id / item kind; `by=item` rows also carry `item_id` and `item` (as above).
+Computed from playback sessions started in `[from, to)` (so `bytes` is stream bytes, `plays` counts sessions).
+
+**`GET /users`** -> `{ "total", "users": [ { "name", "first_seen", "last_seen", "requests", "bytes", "devices": [id], "playback_sessions", "watch_time_s" } ] }`
+
+**`GET /devices`** -> `{ "total", "devices": [ { "id", "first_seen", "last_seen", "requests", "bytes", "user_agent", "ip", "last_user", "users": [name],
+"playback_sessions", "watch_time_s", "device_sessions", "active" } ] }`, most recently seen first.
+
+**`POST /api/analytics/playback`**
+```json
+{ "file_id": "…" , "item_id": "…", "event": "start|progress|pause|resume|stop", "position_s": 12.5, "duration_s": 5400 }
+```
+One of `file_id` / `item_id` is required (`item_id` resolves to the item's best/first file; `404` if unknown); `event` and `position_s` (>= 0)
+are required, `duration_s` is optional (defaults to the probed duration). The device/user come from the identity headers/params. Events go to the
+active session for (device, file), or open one (any event can open a session; `start` is just the natural first one). While `playing`,
+`progress`/`pause`/`stop` add the position advance since the previous event to `watched_s` only when it is plausible continuous playback
+(not more than 2x the elapsed wall time + 2 s; larger jumps are seeks). `pause` -> `paused`; `resume`/`progress`/`start` -> `playing`;
+`stop` closes the session (trailing buffered `/stream` requests within 15 s still count towards its bytes). A session with no events or
+requests for `ANALYTICS_PLAYBACK_IDLE_SECS` is closed too. Send `progress` every ~10-30 s. Response `200`:
+`{ "ok": true, "session_id", "source", "state", "active", "file_id", "item_id", "position_s", "watched_s" }`.
+
 ## Media ingest (server)
 Libraries are no longer scanned. Media enters through the watched ingest directory or the upload
 endpoint, is stored content-addressed and mapped to items from its **file name only**; ffprobe is

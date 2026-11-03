@@ -578,6 +578,7 @@ version = "0.2.0"
 dependencies = [
  "axum",
  "blake3",
+ "http-body",
  "http-body-util",
  "image",
  "libc",
@@ -588,6 +589,7 @@ dependencies = [
  "rusqlite",
  "serde",
  "serde_json",
+ "serde_urlencoded",
  "tokio",
  "tower",
  "tower-http",

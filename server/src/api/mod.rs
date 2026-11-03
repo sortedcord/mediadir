@@ -1,5 +1,6 @@
 //! HTTP API: one router per resource, composed here.
 
+mod analytics;
 mod assets;
 mod fields;
 mod ingest;
@@ -27,6 +28,7 @@ pub struct AppState {
     pub assets: Arc<crate::assets::AssetService>,
     pub ingest: Arc<Ingest>,
     pub tasks: Arc<Maintenance>,
+    pub analytics: Arc<crate::analytics::Analytics>,
 }
 
 pub type Shared = Arc<AppState>;
@@ -42,11 +44,13 @@ pub fn router(state: Shared) -> Router {
         .merge(fields::routes())
         .merge(search::routes())
         .merge(assets::routes())
+        .merge(analytics::routes())
         .layer(CompressionLayer::new());
     Router::new()
         .merge(api)
         .merge(media::routes())
         .fallback(|| async { crate::error::AppError::NotFound("no such route".into()) })
+        .layer(axum::middleware::from_fn_with_state(state.analytics.clone(), crate::analytics::middleware::log))
         .layer(CorsLayer::permissive())
         .with_state(state)
 }

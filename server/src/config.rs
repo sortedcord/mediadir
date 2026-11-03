@@ -33,6 +33,14 @@ pub struct Config {
     pub external_root: Option<PathBuf>,
     /// Background full-hash rate for referenced files, bytes/second (`0` = unlimited).
     pub lazy_hash_rate: u64,
+    /// Library snapshot cadence (`None` = only the one at startup).
+    pub analytics_snapshot: Option<Duration>,
+    /// Raw request rows are deleted after this many days (hourly aggregates are kept forever).
+    pub analytics_raw_days: u64,
+    /// Seconds of /stream inactivity before a playback session closes.
+    pub analytics_play_idle: u64,
+    /// Seconds of request inactivity before a device session closes.
+    pub analytics_device_idle: u64,
 }
 
 fn absolute(p: PathBuf) -> PathBuf {
@@ -67,6 +75,10 @@ impl Config {
             backup_keep: secs("BACKUP_KEEP", 14).max(1) as usize,
             external_root: env("EXTERNAL_ROOT").map(|v| absolute(PathBuf::from(v.trim()))),
             lazy_hash_rate: secs("LAZY_HASH_MB_S", 64) * 1024 * 1024,
+            analytics_snapshot: every("ANALYTICS_SNAPSHOT_SECS", 3600),
+            analytics_raw_days: secs("ANALYTICS_RAW_DAYS", 30),
+            analytics_play_idle: secs("ANALYTICS_PLAYBACK_IDLE_SECS", 300).max(1),
+            analytics_device_idle: secs("ANALYTICS_DEVICE_IDLE_SECS", 1800).max(1),
         }
     }
 

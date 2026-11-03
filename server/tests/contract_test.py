@@ -7,6 +7,7 @@ Needs a FRESH server (empty DATA_DIR / MEDIA_DIR / INGEST_DIR) on this machine, 
 short intervals so the periodic tasks run during the test:
   INGEST_SETTLE_SECS=1 INGEST_POLL_SECS=2 SIDECAR_INTERVAL=2 VERIFY_INTERVAL=3 BACKUP_INTERVAL=3
   ASSET_GC_INTERVAL=2 ASSET_GC_GRACE_SECS=6 ASSET_DIR=<fresh dir> ASSET_DEFAULT_WIDTH=1280
+  ANALYTICS_PLAYBACK_IDLE_SECS=3 ANALYTICS_DEVICE_IDLE_SECS=4 ANALYTICS_SNAPSHOT_SECS=2
 Optional, for the referenced-media tests (skipped when unset): EXTERNAL_ROOT=<fresh dir>
 (must not overlap the other dirs; it may be read-only apart from what the test itself does to
 create/remove its fixtures there).
@@ -471,6 +472,183 @@ def main():
         assert req("GET", "/stream/0000000000000000", raw=True)[0] == 404
         assert req("GET", f"/subtitle/{f['id']}/0", raw=True)[0] == 404
     check("stream: Range 206, HEAD, no gzip, bytes from the store", t_stream)
+
+    # ---- analytics (needs ANALYTICS_PLAYBACK_IDLE_SECS=3 ANALYTICS_DEVICE_IDLE_SECS=4 ANALYTICS_SNAPSHOT_SECS=2) ----
+    def an(path, expect=200):
+        return get("/api/analytics" + path, expect)
+
+    def t_an_traffic():
+        f = state["mv"]["files"][0]
+        t0 = int(time.time()) - 2
+        H = {"X-MediaDir-Device": "ct-dev-1", "X-MediaDir-User": "Alice"}
+        req("GET", "/api/items?limit=1", headers=H, expect=200)
+        req("GET", "/api/items?limit=1", headers=H, expect=200)
+        st, _, body = req("GET", f["stream_url"], headers={**H, "Range": "bytes=0-99"}, raw=True)
+        assert st == 206 and len(body) == 100
+        st, _, body = req("GET", f["stream_url"], headers=H, raw=True)
+        assert st == 200 and len(body) == f["size"]
+        req("HEAD", f["stream_url"], headers=H, raw=True)
+        req("GET", "/stream/0000000000000000", headers=H, raw=True)  # 404 is logged too
+        an("/overview")  # must not be logged
+
+        def rows():
+            r = an(f"/traffic?from={t0}&to={int(time.time()) + 5}&bucket=hour&group_by=route")
+            by = {(x["key"]["route"], x["key"]["group"]): x for x in r["rows"]}
+            s = by.get(("/stream/{file_id}", "stream"))
+            return r, by if s and s["requests"] >= 4 else None
+        r, by = wait_for(lambda: rows()[1] and rows(), timeout=15, what="traffic rows")
+        has(r, "from", "to", "bucket", "group_by", "totals", "rows")
+        s = by[("/stream/{file_id}", "stream")]
+        # 100 (Range) + full file + 0 (HEAD) + small JSON error body for the 404
+        assert s["bytes"] >= 100 + f["size"] and s["bytes"] < 100 + f["size"] + 200, s
+        has(s, "t", "key", "requests", "bytes", "avg_ms", "p50_ms", "p95_ms", "source")
+        assert s["source"] == "raw" and s["p50_ms"] is not None
+        assert ("/api/items", "api") in by and by[("/api/items", "api")]["requests"] >= 2
+        assert not [k for k in by if k[0].startswith("/api/analytics")], list(by)
+        # exact bytes of a single Range request, by device+status
+        r = an(f"/traffic?from={t0}&to={int(time.time()) + 5}&bucket=day&group_by=status")
+        assert {x["key"]["status"] for x in r["rows"]} >= {"2xx", "4xx"}
+        r = an(f"/traffic?from={t0}&to={int(time.time()) + 5}&bucket=day&group_by=device")
+        d = [x for x in r["rows"] if x["key"]["device"] == "ct-dev-1"]
+        assert d and d[0]["requests"] == 6, d  # 2 items + range + full + head + 404
+        assert req("GET", "/api/analytics/traffic?bucket=year")[0] == 400
+        assert req("GET", "/api/analytics/traffic?group_by=x")[0] == 400
+    check("analytics: traffic rows (bytes incl. Range/HEAD/404), analytics endpoints not logged", t_an_traffic)
+
+    def t_an_identity():
+        req("GET", "/api/health?device=ct-dev-q&user=Bob", headers={"User-Agent": "ct-agent/1.0"}, expect=200)
+        req("GET", "/api/health", headers={"User-Agent": "anon-agent/2"}, expect=200)
+        req("GET", "/api/health?device=ignored", headers={"X-MediaDir-Device": "ct-hdr"}, expect=200)
+
+        def devs():
+            d = {x["id"]: x for x in an("/devices")["devices"]}
+            return d if "ct-dev-q" in d and "ct-hdr" in d and any(k.startswith("anon:") for k in d) else None
+        d = wait_for(devs, timeout=15, what="devices")
+        q = d["ct-dev-q"]
+        has(q, "id", "first_seen", "last_seen", "requests", "bytes", "user_agent", "ip", "users", "last_user", "active")
+        assert q["users"] == ["Bob"] and q["user_agent"] == "ct-agent/1.0" and q["ip"] == "127.0.0.1", q
+        anon = [x for k, x in d.items() if k.startswith("anon:")][0]
+        assert anon["id"] == "anon:127.0.0.1" and anon["user_agent"]
+        us = {u["name"]: u for u in an("/users")["users"]}
+        assert "Bob" in us and "Alice" in us and "ct-dev-q" in us["Bob"]["devices"], us.keys()
+        has(us["Alice"], "name", "first_seen", "last_seen", "requests", "bytes", "devices", "playback_sessions", "watch_time_s")
+    check("analytics: device/user from header, query, anon:<ip>; user agent + ip; users/devices", t_an_identity)
+
+    def t_an_inferred_playback():
+        f = state["mv"]["files"][0]
+        item = state["mv"]["id"]
+        H = {"X-MediaDir-Device": "ct-play-1", "X-MediaDir-User": "Carol"}
+        half = f["size"] // 2
+        req("GET", f"{f['stream_url']}?device=ct-play-1&user=Carol", headers={"Range": f"bytes=0-{half - 1}"}, raw=True, expect=206)
+        req("GET", f["stream_url"], headers={**H, "Range": f"bytes={half}-"}, raw=True, expect=206)
+
+        def sess():
+            r = an("/sessions?type=playback&device=ct-play-1")
+            return r["sessions"][0] if r["total"] == 1 and r["sessions"][0]["requests"] == 2 else None
+        s = wait_for(sess, timeout=15, what="inferred session")
+        has(s, "id", "type", "device", "user", "file_id", "item_id", "item", "started_at", "last_at", "ended_at", "active", "source", "state",
+            "bytes", "requests", "watched_s", "max_position_s", "position_s", "duration_s")
+        assert s["source"] == "inferred" and s["active"] is True and s["user"] == "Carol" and s["file_id"] == f["id"] and s["item_id"] == item
+        assert s["bytes"] == f["size"], s
+        assert s["item"]["id"] == item and s["item"]["title"]
+        if f.get("duration"):
+            assert abs(s["watched_s"] - f["duration"]) < 0.2 and abs(s["max_position_s"] - f["duration"]) < 0.2, s
+        npl = [x for x in an("/now-playing")["sessions"] if x["session_id"] == s["id"]]
+        assert npl and npl[0]["item"]["id"] == item and npl[0]["device"] == "ct-play-1" and npl[0]["user"] == "Carol"
+        has(npl[0], "state", "position_s", "duration_s", "source")
+        # closes after the idle timeout
+        done = wait_for(lambda: (lambda x: x if not x["active"] else None)(an(f"/sessions/{s['id']}")), timeout=25, what="session close")
+        assert done["ended_at"] and "ranges" in done and done["ranges"] == [[0, f["size"]]], done
+        assert not [x for x in an("/now-playing")["sessions"] if x["session_id"] == s["id"]]
+        assert req("GET", "/api/analytics/sessions/pb_nope")[0] == 404
+    check("analytics: playback session inferred from /stream (header + query identity, ranges union, idle close)", t_an_inferred_playback)
+
+    def t_an_explicit_playback():
+        f = state["mv"]["files"][0]
+        H = {"X-MediaDir-Device": "ct-play-2", "X-MediaDir-User": "Dave"}
+
+        def ev(event, pos, **kw):
+            return req("POST", "/api/analytics/playback", {"file_id": f["id"], "event": event, "position_s": pos, **kw}, headers=H, expect=200)[1]
+        req("GET", f["stream_url"], headers={**H, "Range": "bytes=0-999"}, raw=True, expect=206)  # inferred part
+        a = ev("start", 0, duration_s=100)
+        has(a, "ok", "session_id", "source", "state", "position_s", "watched_s")
+        assert a["source"] == "explicit" and a["state"] == "playing"
+        time.sleep(1.2)
+        ev("progress", 1.0)
+        time.sleep(1.2)
+        b = ev("progress", 2.0)
+        assert b["session_id"] == a["session_id"]
+        c = ev("pause", 2.0)
+        assert c["state"] == "paused"
+        ev("resume", 2.0)
+        time.sleep(0.3)
+        ev("progress", 50.0)  # a seek: not counted as watched
+        e = ev("stop", 50.0)
+        assert e["state"] == "stopped" and e["active"] is False
+        s = an(f"/sessions/{a['session_id']}")
+        assert s["source"] == "explicit" and s["user"] == "Dave" and s["state"] == "stopped" and s["ended_at"]
+        assert 1.8 <= s["watched_s"] <= 3.2, s
+        assert s["max_position_s"] == 50.0 and s["duration_s"] == 100.0, s
+        assert s["bytes"] == 1000 and s["inferred_watched_s"] >= 0
+        # by item_id
+        r = req("POST", "/api/analytics/playback", {"item_id": state["mv"]["id"], "event": "start", "position_s": 0}, headers={"X-MediaDir-Device": "ct-play-3"}, expect=200)[1]
+        assert r["item_id"] == state["mv"]["id"]
+        req("POST", "/api/analytics/playback", {"item_id": state["mv"]["id"], "event": "stop", "position_s": 0}, headers={"X-MediaDir-Device": "ct-play-3"}, expect=200)
+        for body, code in [({"file_id": f["id"], "event": "dance", "position_s": 0}, 400), ({"file_id": f["id"], "event": "start"}, 400),
+                           ({"event": "start", "position_s": 0}, 400), ({"file_id": "0000000000000000", "event": "start", "position_s": 0}, 404),
+                           ({"file_id": f["id"], "event": "start", "position_s": -1}, 400)]:
+            assert req("POST", "/api/analytics/playback", body, headers=H)[0] == code, body
+    check("analytics: explicit playback events take precedence (exact position/watch time), validation", t_an_explicit_playback)
+
+    def t_an_device_sessions_top():
+        r = wait_for(lambda: (lambda x: x if x["total"] and not x["sessions"][0]["active"] else None)(an("/sessions?type=device&device=ct-dev-1")), timeout=25, what="device session close")
+        s = r["sessions"][0]
+        has(s, "id", "type", "device", "user", "started_at", "last_at", "ended_at", "active", "requests", "bytes")
+        assert s["id"].startswith("dv_") and s["requests"] == 6 and s["user"] == "Alice", s
+        assert an(f"/sessions/{s['id']}")["id"] == s["id"]
+        assert an("/sessions?type=device&active=false&limit=1")["limit"] == 1
+        assert req("GET", "/api/analytics/sessions?type=bogus")[0] == 400
+        item = state["mv"]["id"]
+        t = an("/top?metric=plays&by=item")
+        has(t, "metric", "by", "from", "to", "rows")
+        row = [x for x in t["rows"] if x["key"] == item][0]
+        has(row, "key", "value", "plays", "bytes", "watch_time_s", "item")
+        assert row["plays"] >= 3 and row["item"]["id"] == item
+        assert an("/top?metric=bytes&by=user")["rows"][0]["value"] >= state["mv"]["files"][0]["size"]
+        assert {x["key"] for x in an("/top?metric=watch_time&by=user")["rows"]} >= {"Carol", "Dave"}
+        assert any(x["key"] == "ct-play-1" for x in an("/top?metric=plays&by=device")["rows"])
+        assert any(x["key"] == state["mv"]["kind"] for x in an("/top?metric=plays&by=kind&limit=3")["rows"])
+        assert req("GET", "/api/analytics/top?metric=nope")[0] == 400
+        assert req("GET", "/api/analytics/top?by=nope")[0] == 400
+    check("analytics: device sessions, top lists", t_an_device_sessions_top)
+
+    def t_an_overview_library():
+        o = an("/overview")
+        has(o, "ts", "library", "traffic", "playback", "active", "devices", "users")
+        for w in ("last_24h", "last_7d", "last_30d"):
+            has(o["traffic"][w], "requests", "bytes", "by_group")
+        assert o["traffic"]["last_24h"]["by_group"]["stream"]["bytes"] > 0
+        has(o["active"], "playback_sessions", "device_sessions")
+        lib = o["library"]
+        has(lib, "items", "files", "assets", "people", "relations", "field_defs", "ingest", "disks")
+        assert lib["items"]["total"] > 0 and lib["files"]["count"] > 0 and lib["files"]["by_location"]["store"]["count"] > 0
+        has(lib["ingest"], "queue", "problems", "pending_hashes")
+        for k in ("data", "media", "assets"):
+            has(lib["disks"][k], "path", "total_bytes", "free_bytes")
+            assert lib["disks"][k]["total_bytes"] >= lib["disks"][k]["free_bytes"] > 0
+
+        def snap():
+            r = an("/library?bucket=hour")
+            return r if r["series"] and r["series"][-1]["items"]["total"] > 0 else None
+        r = wait_for(snap, timeout=15, what="snapshot with items")
+        has(r, "from", "to", "bucket", "series")
+        p = r["series"][-1]
+        has(p, "t", "ts", "items", "files", "assets", "disks")
+        assert p["t"] % 3600 == 0 and p["files"]["by_container"] and p["files"]["by_mime"]
+        assert len(r["series"]) == len({x["t"] for x in r["series"]})  # one point per bucket
+        assert req("GET", "/api/analytics/library?bucket=x")[0] == 400
+        assert req("GET", "/api/analytics/overview?x=1")[0] == 200
+    check("analytics: overview + library snapshot series shapes", t_an_overview_library)
 
     def t_no_slots():
         mv = state["movie"]

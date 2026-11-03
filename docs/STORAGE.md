@@ -12,13 +12,17 @@ tools. Media enters through one of two doors and lives in a private, content-add
 | `ASSET_DEFAULT_WIDTH` | Output width of an asset transform request that gives neither `w` nor `h`. | `1280` |
 | `ASSET_GC_INTERVAL` | Seconds between unreferenced-asset garbage collection runs (`0` = off). | `3600` |
 | `ASSET_GC_GRACE_SECS` | An unreferenced asset is only collected once it is older than this (age = last upload of those bytes). | `86400` |
-| `DATA_DIR` | Database, asset transform cache (`asset-cache/`), frame cache, backups. | `./data` |
+| `DATA_DIR` | Database, `analytics.db`, asset transform cache (`asset-cache/`), frame cache, backups. | `./data` |
 | `INGEST_POLL_SECS` | Poll interval in addition to inotify (network mounts don't deliver inotify). `0` = inotify only. | `60` |
 | `INGEST_SETTLE_SECS` | A file must be unchanged (size + mtime) this long before it's ingested, so partial downloads/copies are never taken. | `10` |
 | `SIDECAR_INTERVAL` | Seconds between sidecar manifest sync runs. | `3600` |
 | `VERIFY_INTERVAL` | Seconds between integrity check runs. | `86400` |
 | `EXTERNAL_ROOT` | Optional. Root of [referenced media](#referenced-media): symlinks in `INGEST_DIR` to files under it are catalogued in place. Unset = feature off. May be a read-only mount. Must not contain/be inside `MEDIA_DIR`, `ASSET_DIR` or `DATA_DIR`. | unset |
 | `LAZY_HASH_MB_S` | Read-rate cap (MiB/s) of the background full hash of referenced files (`0` = unlimited). | `64` |
+| `ANALYTICS_SNAPSHOT_SECS` | Seconds between [analytics](#analytics-storage) library snapshots (`0` = only the one taken at startup). | `3600` |
+| `ANALYTICS_RAW_DAYS` | Raw request-log rows are deleted after this many days; hourly aggregates and snapshots are kept forever. | `30` |
+| `ANALYTICS_PLAYBACK_IDLE_SECS` | A playback session closes after this long without `/stream` requests or playback events. | `300` |
+| `ANALYTICS_DEVICE_IDLE_SECS` | A device session closes after this long without any request. | `1800` |
 | `BACKUP_INTERVAL` / `BACKUP_KEEP` | Database backup cadence (seconds) and how many to keep. | `21600` / `14` |
 
 ## Two ways in
@@ -140,6 +144,28 @@ ln -s /mnt/sdb1/Movies/Some.Film.2012.mkv "$INGEST_DIR/"      # the link's name 
 - **Sidecars.** Not written for referenced files (nothing is written next to or about them; the database
   and its backups are the source of truth for them).
 - **Status.** `GET /api/ingest/status` includes `external_root` and `pending_hashes`.
+
+## Analytics storage
+Observability data lives in its own SQLite file, `DATA_DIR/analytics.db` (WAL), so the main database and
+its backups stay lean. The API is documented in [API.md](API.md#analytics). Tables:
+`snapshots` (JSON library snapshot per timestamp), `requests` (raw log), `requests_hourly` (aggregates by
+hour × route group × route template × status class × device × user), `devices`, `device_users`,
+`playback_sessions`, `device_sessions`, `meta`.
+
+- **Request log.** A middleware wraps every response body and counts the bytes actually sent (Range
+  partials, client aborts and gzip'd API bodies included). Events go through a bounded in-memory queue to
+  one writer thread that batch-inserts about once a second, so request latency is unaffected; if the queue
+  overflows, events are dropped and counted (`dropped_events` in the overview). `/api/analytics/*` itself is
+  not logged. Unrouted paths are logged as route `(unmatched)`.
+- **Retention.** Each request also increments its hourly aggregate row when it is written. Raw rows older than
+  `ANALYTICS_RAW_DAYS` are deleted hourly (and at startup); aggregates, snapshots, devices and sessions are kept
+  forever. Percentiles exist only for raw data.
+- **Sessions** live in memory in the writer and are persisted every flush; sessions still open at shutdown are
+  closed (at their last activity) on the next start.
+- **Backups.** The backup task also writes `DATA_DIR/backups/analytics-<unix>.db` (`VACUUM INTO`), pruned with
+  the same `BACKUP_KEEP`. Losing analytics.db loses only history.
+- **Identity.** No auth: `X-MediaDir-Device` / `X-MediaDir-User` headers (or `?device=` / `?user=`), else
+  `anon:<client ip>`. The IP is the first `X-Forwarded-For` / `X-Real-IP` value if present, else the socket peer.
 
 ## Deleting
 `DELETE /api/items/{id}` removes the item (and its children) and every stored file that is no longer

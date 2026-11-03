@@ -36,6 +36,8 @@ Pick four directories on persistent storage, ideally on the same filesystem so i
 | `ASSET_DIR` | Content-addressed image store (must not overlap ingest/media) |
 | `INGEST_DIR` | Drop folder watched for new media |
 | `EXTERNAL_ROOT` | Optional. Reference media in place on another disk: `ln -s /mnt/sdb1/Movies/x.mkv $INGEST_DIR/` (symlink target must be under this root; never copied, moved or written; may be read-only). See [docs/STORAGE.md](docs/STORAGE.md#referenced-media) |
+| `ANALYTICS_SNAPSHOT_SECS` / `ANALYTICS_RAW_DAYS` | Analytics: library snapshot cadence (default `3600`) and raw request-log retention in days (default `30`; aggregates are kept forever). Data lives in `DATA_DIR/analytics.db`, API under `/api/analytics/*` (see [docs/API.md](docs/API.md#analytics)) |
+| `ANALYTICS_PLAYBACK_IDLE_SECS` / `ANALYTICS_DEVICE_IDLE_SECS` | Inactivity after which a playback session (default `300`) / device session (default `1800`) closes |
 
 All other knobs are listed in [docs/STORAGE.md](docs/STORAGE.md).
 

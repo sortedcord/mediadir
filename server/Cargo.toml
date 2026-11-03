@@ -18,6 +18,8 @@ notify = "8"
 blake3 = "1"
 libc = "0.2"
 http-body-util = "0.1"
+http-body = "1"
+serde_urlencoded = "0.7"
 image = { version = "0.25", default-features = false, features = ["jpeg", "png", "webp", "gif"] }
 
 [profile.release]

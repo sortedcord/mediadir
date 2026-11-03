@@ -43,6 +43,7 @@ pub struct Maintenance {
     db: Db,
     store: Store,
     assets: Arc<AssetService>,
+    analytics: Arc<crate::analytics::Analytics>,
     backups: PathBuf,
     cfg: Config,
 }
@@ -67,8 +68,8 @@ impl Task {
 }
 
 impl Maintenance {
-    pub fn new(db: Db, store: Store, assets: Arc<AssetService>, cfg: &Config) -> Arc<Self> {
-        Arc::new(Maintenance { db, store, assets, backups: cfg.data_dir.join("backups"), cfg: cfg.clone() })
+    pub fn new(db: Db, store: Store, assets: Arc<AssetService>, analytics: Arc<crate::analytics::Analytics>, cfg: &Config) -> Arc<Self> {
+        Arc::new(Maintenance { db, store, assets, analytics, backups: cfg.data_dir.join("backups"), cfg: cfg.clone() })
     }
 
     pub fn spawn(self: &Arc<Self>) {
@@ -330,15 +331,24 @@ impl Maintenance {
             let conn = self.db.conn()?;
             conn.execute("VACUUM INTO ?1", [path.to_string_lossy()])?;
         }
-        let mut all: Vec<PathBuf> = std::fs::read_dir(&self.backups)?
-            .flatten()
-            .map(|e| e.path())
-            .filter(|p| p.file_name().map(|n| n.to_string_lossy()).is_some_and(|n| n.starts_with("mediadir-") && n.ends_with(".db")))
-            .collect();
-        all.sort();
-        let extra = all.len().saturating_sub(self.cfg.backup_keep);
-        for old in &all[..extra] {
-            let _ = std::fs::remove_file(old);
+        // analytics.db rides along (a small file; losing it loses only history)
+        let apath = self.backups.join(format!("analytics-{}.db", now()));
+        if !apath.exists() {
+            if let Err(e) = self.analytics.backup_to(&apath) {
+                eprintln!("backup: analytics.db: {e}");
+            }
+        }
+        for prefix in ["mediadir-", "analytics-"] {
+            let mut all: Vec<PathBuf> = std::fs::read_dir(&self.backups)?
+                .flatten()
+                .map(|e| e.path())
+                .filter(|p| p.file_name().map(|n| n.to_string_lossy()).is_some_and(|n| n.starts_with(prefix) && n.ends_with(".db")))
+                .collect();
+            all.sort();
+            let extra = all.len().saturating_sub(self.cfg.backup_keep);
+            for old in &all[..extra] {
+                let _ = std::fs::remove_file(old);
+            }
         }
         Ok(path)
     }
