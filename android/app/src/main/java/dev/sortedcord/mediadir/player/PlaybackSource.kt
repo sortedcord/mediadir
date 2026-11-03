@@ -1,5 +1,6 @@
 package dev.sortedcord.mediadir.player
 
+import dev.sortedcord.mediadir.data.Graph
 import dev.sortedcord.mediadir.data.Json
 import dev.sortedcord.mediadir.data.Settings
 import dev.sortedcord.mediadir.domain.QueueEntry
@@ -44,6 +45,7 @@ object PlaybackSource {
         return try {
             c.connectTimeout = 5000; c.readTimeout = 20000
             c.setRequestProperty("Accept", "application/json")
+            Graph.settings.applyIdentity(c)
             val code = c.responseCode
             val body = (if (code >= 400) c.errorStream else c.inputStream)?.bufferedReader()?.use { it.readText() } ?: ""
             if (code >= 400) throw java.io.IOException("HTTP $code")

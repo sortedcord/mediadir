@@ -75,6 +75,7 @@ internal object Json {
         streamUrl = o.str("stream_url") ?: "/stream/${o.optString("id")}",
         part = o.int("part"), edition = o.str("edition"),
         hash = o.str("hash"), originalName = o.str("original_name"), addedAt = o.long("added_at"),
+        location = o.str("location"), hashState = o.str("hash_state"),
     )
 
     fun fieldsMap(o: JSONObject?): Map<String, Any?> = (plain(o) as? Map<String, Any?>) ?: emptyMap()

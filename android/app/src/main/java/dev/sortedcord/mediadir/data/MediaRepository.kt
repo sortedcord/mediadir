@@ -60,6 +60,7 @@ class HttpMediaRepository(private val settings: Settings) : MediaRepository {
             c.requestMethod = method // Android's HttpURLConnection (okhttp) accepts PATCH
             c.connectTimeout = 5000; c.readTimeout = 20000
             c.setRequestProperty("Accept", "application/json")
+            Graph.settings.applyIdentity(c)
             if (body != null) {
                 c.doOutput = true
                 c.setRequestProperty("Content-Type", "application/json")
@@ -139,6 +140,7 @@ class HttpMediaRepository(private val settings: Settings) : MediaRepository {
             c.requestMethod = "POST"; c.connectTimeout = 5000; c.readTimeout = 120000
             c.doOutput = true; c.setChunkedStreamingMode(64 * 1024)
             c.setRequestProperty("Content-Type", "application/octet-stream")
+            Graph.settings.applyIdentity(c)
             open().use { input -> c.outputStream.use { output -> input.copyTo(output) } }
             val code = c.responseCode
             val text = (if (code >= 400) c.errorStream else c.inputStream)?.bufferedReader()?.use { it.readText() } ?: ""
@@ -160,6 +162,7 @@ class HttpMediaRepository(private val settings: Settings) : MediaRepository {
             c.doOutput = true
             c.setChunkedStreamingMode(64 * 1024)
             c.setRequestProperty("Content-Type", "application/octet-stream")
+            Graph.settings.applyIdentity(c)
             c.setRequestProperty("X-Filename", enc(name).replace("+", "%20"))
             open().use { input -> c.outputStream.use { output -> input.copyTo(output) } }
             val code = c.responseCode

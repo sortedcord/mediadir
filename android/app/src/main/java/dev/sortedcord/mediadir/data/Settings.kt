@@ -26,6 +26,25 @@ class Settings(ctx: Context) {
         get() = prefs.getInt("hq_pause_delay_ms", 1200)
         set(v) = prefs.edit().putInt("hq_pause_delay_ms", v).apply()
 
+    /** Stable random per-install id, generated on first use. */
+    val deviceId: String
+        get() = prefs.getString("device_id", null)?.takeIf { it.isNotBlank() }
+            ?: java.util.UUID.randomUUID().toString().also { prefs.edit().putString("device_id", it).apply() }
+
+    /** Optional display name sent as X-MediaDir-User. */
+    var userName: String
+        get() = prefs.getString("user_name", "") ?: ""
+        set(v) = prefs.edit().putString("user_name", v.trim()).apply()
+
+    /** Analytics identity headers; the single source for every HTTP client (API, Coil, ExoPlayer, frames). */
+    fun identityHeaders(): Map<String, String> {
+        fun clean(s: String) = s.filter { it.code in 0x20..0x7E }.trim().take(128)
+        val m = linkedMapOf("X-MediaDir-Device" to clean(deviceId))
+        clean(userName).takeIf { it.isNotEmpty() }?.let { m["X-MediaDir-User"] = it }
+        return m
+    }
+    fun applyIdentity(c: java.net.HttpURLConnection) { identityHeaders().forEach { (k, v) -> c.setRequestProperty(k, v) } }
+
     fun position(itemId: String) = positions.getLong(itemId, 0)
     fun savePosition(itemId: String, ms: Long) = positions.edit().putLong(itemId, ms).apply()
 

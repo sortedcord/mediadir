@@ -35,7 +35,12 @@ data class MediaFile(
     val audio: List<AudioTrack>, val subtitles: List<SubtitleTrack>, val streamUrl: String,
     val part: Int? = null, val edition: String? = null,
     val hash: String? = null, val originalName: String? = null, val addedAt: Long? = null,
+    val location: String? = null, val hashState: String? = null,
 ) {
+    /** Hash may be "fp:<hex>" (fingerprint) while the real hash is pending for referenced media. */
+    val hashPending: Boolean get() = hashState == "pending" || hash?.startsWith("fp:") == true
+    val external: Boolean get() = location == "external"
+    fun badges(): List<String> = listOfNotNull(if (external) "external" else null, if (hashPending) "hash pending" else null)
     /** Shorter side, used for ordering and the quality preference. 0 for audio. */
     val h: Int get() {
         val v = video ?: return 0

@@ -26,6 +26,7 @@ fun SettingsScreen(nav: Nav) {
     var quality by remember { mutableIntStateOf(s.quality) }
     var hq by remember { mutableStateOf(s.hqPauseFrame) }
     var hqDelay by remember { mutableIntStateOf(s.hqPauseDelayMs) }
+    var userName by remember { mutableStateOf(s.userName) }
     var status by remember { mutableStateOf<String?>(null) }
     Scaffold(containerColor = Bg, topBar = {
         TopAppBar(title = { Text("Settings") }, navigationIcon = { IconButton(onClick = nav::back) { Icon(Icons.AutoMirrored.Filled.ArrowBack, "Back") } },
@@ -45,6 +46,11 @@ fun SettingsScreen(nav: Nav) {
                 TextButton(onClick = { s.server = url; nav.home() }) { Text("Save & reload") }
             }
             status?.let { Text(it, color = Muted, fontSize = 13.sp) }
+
+            HorizontalDivider(Modifier.padding(vertical = 16.dp))
+            Text("Identity", style = MaterialTheme.typography.titleMedium)
+            Text("Shown in the server's playback analytics. Optional.", color = Muted, fontSize = 12.sp)
+            OutlinedTextField(userName, { userName = it; s.userName = it }, label = { Text("User name") }, singleLine = true, modifier = Modifier.fillMaxWidth())
 
             HorizontalDivider(Modifier.padding(vertical = 16.dp))
             Text("Default quality", style = MaterialTheme.typography.titleMedium)

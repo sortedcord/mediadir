@@ -143,7 +143,7 @@ class PlayerActivity : ComponentActivity(), GestureLayer.Listener {
     private var inPip = false
     private val ui = Handler(Looper.getMainLooper())
     private val saveTick = object : Runnable {
-        override fun run() { savePos(); ui.postDelayed(this, 5000) }
+        override fun run() { savePos(); reportSync(); ui.postDelayed(this, 5000) }
     }
 
     private val maxH get() = sessionMaxH ?: settings.quality
@@ -401,6 +401,7 @@ class PlayerActivity : ComponentActivity(), GestureLayer.Listener {
                         val c = java.net.URL(url).openConnection() as java.net.HttpURLConnection
                         try {
                             c.connectTimeout = 5000; c.readTimeout = 40_000
+                            settings.applyIdentity(c)
                             if (c.responseCode != 200) throw java.io.IOException("HTTP ${c.responseCode}")
                             c.getHeaderField("X-Frame-Pts")?.toDoubleOrNull()?.let { pts ->
                                 val fps = best.video?.fps ?: 30.0
@@ -546,6 +547,7 @@ class PlayerActivity : ComponentActivity(), GestureLayer.Listener {
         val p = player ?: return
         val i = p.currentMediaItemIndex
         val pos = p.currentPosition.coerceAtLeast(0); val pwr = p.playWhenReady
+        runCatching { reporter.stop(pos / 1000.0, p.duration.takeIf { it > 0 }?.let { it / 1000.0 }) }
         dropHq()
         val rearm = loop.armed
         loop.disarm()
@@ -575,6 +577,7 @@ class PlayerActivity : ComponentActivity(), GestureLayer.Listener {
             Quality.Support.NONE -> "unsupported"
         }
         tag?.let { parts += it }
+        parts += f.badges()
         val ed = queue.getOrNull(currentIndex())?.edition(f.id)
         val base = f.label.ifBlank { fileTitle(f) }
         val head = (if (ed != null && !base.startsWith(ed)) "$ed · $base" else base) +
@@ -773,6 +776,18 @@ class PlayerActivity : ComponentActivity(), GestureLayer.Listener {
         queue.indices.firstOrNull { queue[it].item.id == e.item.id && queue[it].part == saved }?.let { startIndex = it }
     }
 
+    private val reporter = dev.sortedcord.mediadir.data.PlaybackReporter()
+
+    private fun reportSync() {
+        runCatching {
+            val p = player ?: return
+            val fid = chosen.getOrNull(p.currentMediaItemIndex)?.id
+            val playing = p.playWhenReady && p.playbackState != Player.STATE_ENDED && p.playbackState != Player.STATE_IDLE
+            val dur = p.duration.takeIf { it > 0 }?.let { it / 1000.0 }
+            reporter.update(fid, playing, p.currentPosition / 1000.0, dur)
+        }
+    }
+
     private fun savePos() {
         val p = player ?: return
         val i = p.currentMediaItemIndex
@@ -799,6 +814,7 @@ class PlayerActivity : ComponentActivity(), GestureLayer.Listener {
             .setEnableDecoderFallback(true)
         val http = DefaultHttpDataSource.Factory()
             .setConnectTimeoutMs(10_000).setReadTimeoutMs(30_000).setAllowCrossProtocolRedirects(true)
+            .setDefaultRequestProperties(settings.identityHeaders())
         // Big buffers: high-bitrate originals over LAN.
         val load = DefaultLoadControl.Builder()
             .setBufferDurationsMs(15_000, 120_000, 1_500, 3_000)
@@ -865,8 +881,9 @@ class PlayerActivity : ComponentActivity(), GestureLayer.Listener {
                 if (reason != Player.MEDIA_ITEM_TRANSITION_REASON_PLAYLIST_CHANGED) { seekOverlay.clear(); clearLoop() }
                 dropHq()
                 onEntryChanged()
+                reportSync()
             }
-            override fun onPlayWhenReadyChanged(playWhenReady: Boolean, reason: Int) { updateGhostButtons(); hqOnStateChange() }
+            override fun onPlayWhenReadyChanged(playWhenReady: Boolean, reason: Int) { updateGhostButtons(); hqOnStateChange(); reportSync() }
             override fun onPositionDiscontinuity(old: Player.PositionInfo, new: Player.PositionInfo, reason: Int) {
                 if (reason == Player.DISCONTINUITY_REASON_SEEK || reason == Player.DISCONTINUITY_REASON_AUTO_TRANSITION ||
                     reason == Player.DISCONTINUITY_REASON_SEEK_ADJUSTMENT || reason == Player.DISCONTINUITY_REASON_REMOVE) calibrate(new.positionMs)
@@ -876,6 +893,7 @@ class PlayerActivity : ComponentActivity(), GestureLayer.Listener {
                 updateGhostButtons()
                 hqOnStateChange()
                 if (state == Player.STATE_ENDED) {
+                    runCatching { reporter.stop(p.duration.takeIf { it > 0 }?.let { it / 1000.0 }, p.duration.takeIf { it > 0 }?.let { it / 1000.0 }) }
                     queue.getOrNull(p.currentMediaItemIndex)?.let { settings.savePosition(it.item.id, 0); settings.savePosition(partKey(it.item.id), 0) }
                     finish()
                 }
@@ -897,6 +915,7 @@ class PlayerActivity : ComponentActivity(), GestureLayer.Listener {
         loop.disarm()
         dropHq()
         player?.let {
+            runCatching { reporter.stop(it.currentPosition / 1000.0, it.duration.takeIf { d -> d > 0 }?.let { d -> d / 1000.0 }) }
             savePos()
             restoreIndex = it.currentMediaItemIndex; restorePos = it.currentPosition
             it.release()
