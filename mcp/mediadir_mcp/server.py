@@ -7,8 +7,9 @@ from __future__ import annotations
 import functools
 import json
 import os
+import re
 from typing import Any, Optional
-from urllib.parse import quote
+from urllib.parse import quote, urlencode
 
 import httpx
 from mcp.server.fastmcp import FastMCP
@@ -89,10 +90,30 @@ def _slim_file(f: dict) -> dict:
     return out
 
 
+def _is_ref(v: Any) -> bool:
+    return isinstance(v, dict) and isinstance(v.get("hash"), str) and set(v) == {"hash"}
+
+
+def _compact_fields(fields: Any) -> Any:
+    """Image field values ({"hash":h} or a list of those) become "img:<hash>" / ["img:<hash>", ...]."""
+    if not isinstance(fields, dict):
+        return fields
+    out = {}
+    for k, v in fields.items():
+        if _is_ref(v):
+            v = "img:" + v["hash"]
+        elif isinstance(v, list) and v and all(_is_ref(x) for x in v):
+            v = ["img:" + x["hash"] for x in v]
+        out[k] = v
+    return out
+
+
 def _slim_item(d: dict, full: bool) -> dict:
     if full:
         return d
-    out = {k: v for k, v in d.items() if k not in ("display", "children", "files", "images", "card", "extras")}
+    out = {k: v for k, v in d.items() if k not in ("display", "children", "files", "card", "extras")}
+    if "fields" in out:
+        out["fields"] = _compact_fields(out["fields"])
     out["files"] = [_slim_file(f) for f in d.get("files") or []]
     if d.get("children") is not None:
         out["children"] = [_slim_summary(c) for c in d["children"]]
@@ -101,6 +122,8 @@ def _slim_item(d: dict, full: bool) -> dict:
 
 def _slim_person(d: dict) -> dict:
     out = {k: v for k, v in d.items() if k not in ("display", "credits")}
+    if "fields" in out:
+        out["fields"] = _compact_fields(out["fields"])
     out["credits"] = [{"credit_id": c.get("id"), "role": c.get("role"), "character": c.get("character"),
                        "item": _slim_summary(c["item"]) if c.get("item") else None}
                       for c in d.get("credits") or []]
@@ -187,7 +210,8 @@ def set_item_field(item_id: str, key: str, value: Any) -> Any:
 
     The field must be defined first (list_field_defs / create_field_def). Value is validated against the
     field type: text/url/date -> string, number/rating/duration -> number, bool -> boolean,
-    tags -> list of strings, person -> person id or list of person ids. null clears it.
+    tags -> list of strings, person -> person id or list of person ids, image -> {"hash": h} or a list of
+    those (prefer set_image_field, which uploads for you). null clears it.
     """
     return _slim_item(_call("PUT", f"/api/items/{_enc(item_id)}/fields/{_enc(key)}", json={"value": value}), False)
 
@@ -211,10 +235,10 @@ def create_field_def(key: str, label: str, type: str, applies_to: Optional[list[
                      display: Optional[dict] = None) -> Any:
     """Create a custom field definition.
 
-    type: text | number | date | url | tags | rating | bool | duration | person.
+    type: text | number | date | url | tags | rating | bool | duration | person | image.
     applies_to: item kinds (plus "person"); empty/omitted = all.
     display (optional): {placement: card_badge|card_meta|header|info|section|hidden,
-      widget: badge|chip|text|rating|link|tags|people|markdown|stat, order, format ("{value}"), color "#RRGGBB", icon}.
+      widget: badge|chip|text|rating|link|tags|people|markdown|stat|image (default for image fields, placement hidden), order, format ("{value}"), color "#RRGGBB", icon}.
     """
     body = {"key": key, "label": label, "type": type, "applies_to": applies_to or []}
     if display:
@@ -294,26 +318,6 @@ def delete_person_field(person_id: str, key: str) -> Any:
 
 
 @tool()
-def set_person_image(person_id: str, source: str) -> Any:
-    """Set a person's photo from a local file path or an http(s) URL (JPEG, PNG or WebP)."""
-    if source.startswith(("http://", "https://")):
-        try:
-            resp = httpx.get(source, timeout=TIMEOUT, follow_redirects=True)
-            resp.raise_for_status()
-        except httpx.HTTPError as e:
-            raise ToolError(f"could not download image: {e}") from e
-        data = resp.content
-    else:
-        try:
-            with open(os.path.expanduser(source), "rb") as f:
-                data = f.read()
-        except OSError as e:
-            raise ToolError(f"could not read image file: {e}") from e
-    return _slim_person(_call("PUT", f"/api/people/{_enc(person_id)}/image", content=data,
-                              headers={"Content-Type": "application/octet-stream"}))
-
-
-@tool()
 def add_credit(item_id: str, role: str, person_id: Optional[str] = None, person_name: Optional[str] = None,
                character: Optional[str] = None, order: Optional[int] = None) -> Any:
     """Add a credit (person in a role) to an item. Give person_id, or person_name to find/create by name.
@@ -390,22 +394,19 @@ def get_item_relations(item_id: str) -> Any:
 
 
 @tool()
-def create_relation(type: str, members: list[dict], name: Optional[str] = None, props: Optional[dict] = None) -> Any:
+def create_relation(type: str, members: list[dict], name: Optional[str] = None) -> Any:
     """Create a relation. type is free-form (collection, album, soundtrack_of, ...; normalized to
     lowercase_snake). members: at least one {item_id, ord?, role?}; unique existing items."""
     body: dict[str, Any] = {"type": type, "members": _members(members)}
     if name is not None:
         body["name"] = name
-    if props is not None:
-        body["props"] = props
     return _slim_relation(_call("POST", "/api/relations", json=body))
 
 
 @tool()
-def update_relation(relation_id: str, name: Optional[str] = None, type: Optional[str] = None,
-                    props: Optional[dict] = None) -> Any:
-    """Change a relation's name, type or props (props replaces the whole object)."""
-    body = {k: v for k, v in dict(name=name, type=type, props=props).items() if v is not None}
+def update_relation(relation_id: str, name: Optional[str] = None, type: Optional[str] = None) -> Any:
+    """Change a relation's name or type (relations have no props)."""
+    body = {k: v for k, v in dict(name=name, type=type).items() if v is not None}
     if not body:
         raise ToolError("nothing to update")
     return _slim_relation(_call("PATCH", f"/api/relations/{_enc(relation_id)}", json=body))
@@ -436,6 +437,106 @@ def replace_relation_members(relation_id: str, members: list[dict]) -> Any:
     """Replace the whole member list with [{item_id, ord?, role?}]. An empty list deletes the relation."""
     return _slim_relation(_call("PUT", f"/api/relations/{_enc(relation_id)}/members",
                                 json={"members": _members(members)}))
+
+
+# ---------------------------------------------------------------- image assets
+
+_HASH_RE = re.compile(r"^[0-9a-fA-F]{64}$")
+
+
+def _upload_bytes(data: bytes) -> dict:
+    return _call("POST", "/api/assets", content=data, headers={"Content-Type": "application/octet-stream"})
+
+
+def _upload_source(source: str) -> dict:
+    if source.startswith(("http://", "https://")):
+        try:
+            resp = httpx.get(source, timeout=TIMEOUT, follow_redirects=True)
+            resp.raise_for_status()
+        except httpx.HTTPError as e:
+            raise ToolError(f"could not download image: {e}") from e
+        data = resp.content
+    else:
+        try:
+            with open(os.path.expanduser(source), "rb") as f:
+                data = f.read()
+        except OSError as e:
+            raise ToolError(f"could not read image file: {e}") from e
+    return _upload_bytes(data)
+
+
+def _asset_url(hash: str, w=None, h=None, fit=None, fmt=None, q=None) -> str:
+    qs = urlencode({k: v for k, v in dict(w=w, h=h, fit=fit, fmt=fmt, q=q).items() if v is not None})
+    return f"{BASE_URL}/asset/{_enc(hash.lower())}" + (f"?{qs}" if qs else "")
+
+
+@tool()
+def upload_asset(path_or_url: str) -> Any:
+    """Upload an image (JPEG/PNG/WebP/GIF, max 100 MB) as a content-addressed asset. path_or_url is a
+    local file path (on the machine running this MCP server) or an http(s) URL the MCP server downloads.
+    Returns {hash, mime, width, height, size}. Identical bytes always give the same hash (deduped).
+    Unreferenced assets are garbage-collected ~24 h after upload, so attach it to an image field promptly
+    (set_image_field does upload + attach in one step)."""
+    return _upload_source(path_or_url)
+
+
+@tool()
+def get_asset_info(hash: str) -> Any:
+    """Check an asset exists and describe it: {hash, url, mime, size}. Only response headers are read
+    (no bytes downloaded). 404 is a tool error. Pixel dimensions are only returned by upload_asset."""
+    if not _HASH_RE.match(hash):
+        raise ToolError("hash must be 64 hex characters")
+    url = _asset_url(hash)
+    try:
+        with _http().stream("GET", f"/asset/{hash.lower()}", params={"original": 1}) as r:
+            if r.status_code >= 400:
+                raise ToolError(f"MediaDir API GET /asset/{hash} -> {r.status_code}")
+            info = {"hash": hash.lower(), "url": url, "mime": r.headers.get("content-type"),
+                    "size": int(r.headers["content-length"]) if "content-length" in r.headers else None}
+    except httpx.HTTPError as e:
+        raise ToolError(f"cannot reach MediaDir at {BASE_URL}: {e}") from e
+    return info
+
+
+@tool()
+def asset_url(hash: str, w: Optional[int] = None, h: Optional[int] = None, fit: Optional[str] = None,
+              fmt: Optional[str] = None, q: Optional[int] = None) -> Any:
+    """Build the display URL of an asset (no bytes are fetched). w/h: target pixels (aspect kept if one
+    given, never upscaled); fit: cover (default) | contain; fmt: webp (default) | jpg | png; q: 1-100.
+    With no options the URL serves the original bytes. Returns {url}."""
+    if not _HASH_RE.match(hash):
+        raise ToolError("hash must be 64 hex characters")
+    return {"url": _asset_url(hash, w, h, fit, fmt, q)}
+
+
+@tool()
+def set_image_field(owner: str, id: str, key: str, sources: list[str], append: bool = False) -> Any:
+    """Upload images as needed and set an `image` field on an item or person.
+
+    owner: "item" or "person"; id: its id; key: an image field (create_field_def type "image" first).
+    sources: local file paths, http(s) URLs, or existing 64-hex asset hashes.
+    Value rule: the result is ONE ref {"hash"} when exactly one image ends up in the field AND the
+    field's current value is not a list; otherwise it is an ordered list of refs. append=false replaces the
+    value with the sources; append=true appends them (duplicates by hash skipped) to the current images.
+    To force a list from a single image, set a list first (e.g. via set_item_field) or pass 2+ sources.
+    Returns the updated item/person (image values shown as "img:<hash>")."""
+    if owner not in ("item", "person"):
+        raise ToolError('owner must be "item" or "person"')
+    if not sources:
+        raise ToolError("sources must not be empty")
+    base = f"/api/{'items' if owner == 'item' else 'people'}/{_enc(id)}"
+    cur = _call("GET", base).get("fields", {}).get(key)
+    hashes: list[str] = []
+    if append and cur:
+        hashes += [x["hash"] for x in (cur if isinstance(cur, list) else [cur]) if _is_ref(x)]
+    for src in sources:
+        h = src.lower() if _HASH_RE.match(src) else _upload_source(src)["hash"]
+        if h not in hashes:
+            hashes.append(h)
+    refs = [{"hash": h} for h in hashes]
+    value: Any = refs[0] if len(refs) == 1 and not isinstance(cur, list) else refs
+    d = _call("PUT", f"{base}/fields/{_enc(key)}", json={"value": value})
+    return _slim_item(d, False) if owner == "item" else _slim_person(d)
 
 
 # ---------------------------------------------------------------- ingest (read-only)

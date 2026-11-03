@@ -75,17 +75,20 @@ Add to `claude_desktop_config.json` (Linux: `~/.config/Claude/`, macOS: `~/Libra
 - Discovery: `list_libraries`, `list_items`, `search`, `get_item`
 - Item metadata: `update_item`, `unlock_field`, `set_item_field`, `delete_item_field`
 - Field definitions: `list_field_defs`, `create_field_def`, `update_field_def`, `delete_field_def`
-- People and credits: `search_people`, `get_person`, `create_person`, `update_person`, `delete_person`, `set_person_field`, `delete_person_field`, `set_person_image`, `add_credit`, `update_credit`, `remove_credit`
+- People and credits: `search_people`, `get_person`, `create_person`, `update_person`, `delete_person`, `set_person_field`, `delete_person_field`, `add_credit`, `update_credit`, `remove_credit`
+- Images: `upload_asset`, `get_asset_info`, `asset_url`, `set_image_field`
 - Relations: `list_relation_types`, `list_relations`, `get_relation`, `get_item_relations`, `create_relation`, `update_relation`, `delete_relation`, `add_relation_member`, `remove_relation_member`, `replace_relation_members`
 - Ingest (read-only): `ingest_status`
 
 Results are compact JSON text; API errors come back as tool errors with the server's message.
 
-Known limits (API gaps): the API has no item artwork upload, so there is no item thumbnail tool; credits have no PATCH, so `update_credit` re-creates the credit (its id changes).
+Images: images are content-addressed assets, not item slots. Define an `image` field with `create_field_def(type="image")`, then `set_image_field(owner, id, key, sources, append=false)` uploads each source (local path or http(s) URL, fetched by the MCP server, or an existing 64-hex hash) and sets the field. Value rule: one ref `{"hash"}` if exactly one image results and the field's current value is not a list, otherwise an ordered list; `append=true` adds to the current images (deduped). `asset_url` returns a display URL (`w`, `h`, `fit`, `fmt`, `q`) without fetching bytes. In `get_item`/`get_person` image values are shown as `img:<hash>` (use `full=true` for raw refs). Assets not referenced by a field are garbage-collected by the server about 24 h after upload. Relations have no props.
+
+Known limits (API gaps): credits have no PATCH, so `update_credit` re-creates the credit (its id changes).
 
 ## Tests
 
-`tests/smoke_test.py` starts a disposable server (temp dirs, port 8199, never 8096), uploads a generated ffmpeg clip, and drives this server over stdio with the MCP client SDK. Needs a built server binary and ffmpeg:
+`tests/smoke_test.py` starts a disposable server (temp dirs, port 8199, never 8096), uploads a generated ffmpeg clip (with a fresh `ASSET_DIR`), exercises assets/image fields, and drives this server over stdio with the MCP client SDK. Needs a built server binary and ffmpeg:
 
 ```sh
 (cd ../server && cargo build --release)

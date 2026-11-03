@@ -36,7 +36,8 @@ async def main():
     srv = None
     try:
         env = dict(os.environ, INGEST_DIR=f"{tmp}/ingest", MEDIA_DIR=f"{tmp}/store", DATA_DIR=f"{tmp}/data",
-                   BIND=f"127.0.0.1:{PORT}", INGEST_SETTLE_SECS="1", INGEST_POLL_SECS="2")
+                   BIND=f"127.0.0.1:{PORT}", INGEST_SETTLE_SECS="1", INGEST_POLL_SECS="2",
+                   ASSET_DIR=f"{tmp}/assets")
         srv = subprocess.Popen([BIN], env=env, cwd=tmp, stdout=open(f"{tmp}/server.log", "w"), stderr=subprocess.STDOUT)
         for _ in range(60):
             try:
@@ -66,7 +67,8 @@ async def main():
                 return json.loads(res.content[0].text), None
 
             tools = {t.name for t in (await s.list_tools()).tools}
-            ok("tool list", {"list_libraries", "update_item", "create_relation", "ingest_status"} <= tools, tools)
+            ok("tool list", {"list_libraries", "update_item", "create_relation", "ingest_status", "upload_asset", "asset_url", "get_asset_info", "set_image_field"} <= tools, tools)
+            ok("set_person_image removed", "set_person_image" not in tools)
             ok("no destructive item/file tools", not any(("delete_item" == t or "delete_file" in t or "delete_media" in t) for t in tools))
 
             libs, e = await call("list_libraries")
@@ -101,6 +103,56 @@ async def main():
             _, e = await call("delete_field_def", key="mood")
             ok("delete_field_def", e is None, e)
 
+
+            # ---- images
+            subprocess.run(["ffmpeg", "-v", "error", "-y", "-f", "lavfi", "-i", "testsrc=size=200x300", "-frames:v", "1", f"{tmp}/a.png"], check=True)
+            subprocess.run(["ffmpeg", "-v", "error", "-y", "-f", "lavfi", "-i", "smptebars=size=200x300", "-frames:v", "1", f"{tmp}/b.jpg"], check=True)
+            shutil.copy(f"{tmp}/a.png", f"{tmp}/a_copy.png")
+            a1, e = await call("upload_asset", path_or_url=f"{tmp}/a.png")
+            ok("upload_asset", a1 and len(a1["hash"]) == 64 and a1["width"] == 200 and a1["height"] == 300, (a1, e))
+            a2, e = await call("upload_asset", path_or_url=f"{tmp}/a_copy.png")
+            ok("upload dedupe (same hash)", a2 and a2["hash"] == a1["hash"], (a2, e))
+            a3, e = await call("upload_asset", path_or_url=URL + f"/asset/{a1['hash']}")
+            ok("upload_asset from URL dedupes", a3 and a3["hash"] == a1["hash"], (a3, e))
+            _, e = await call("upload_asset", path_or_url=f"{tmp}/clip.mkv")
+            ok("upload non-image is tool error", e is not None)
+            _, e = await call("upload_asset", path_or_url=f"{tmp}/missing.png")
+            ok("upload missing file is tool error", e is not None)
+            u, e = await call("asset_url", hash=a1["hash"], w=100, fmt="jpg")
+            ok("asset_url", u and u["url"] == f"{URL}/asset/{a1['hash']}?w=100&fmt=jpg", (u, e))
+            r = httpx.get(u["url"])
+            ok("asset_url serves resized jpeg", r.status_code == 200 and r.headers["content-type"] == "image/jpeg")
+            inf, e = await call("get_asset_info", hash=a1["hash"])
+            ok("get_asset_info", inf and inf["mime"] == "image/png" and inf["size"] == a1["size"], (inf, e))
+            _, e = await call("get_asset_info", hash="0" * 64)
+            ok("get_asset_info unknown hash errors", e is not None)
+
+            d, e = await call("create_field_def", key="poster", label="Poster", type="image", applies_to=["movie", "person"])
+            ok("create_field_def image", d and d["type"] == "image", (d, e))
+            it, e = await call("set_image_field", owner="item", id=iid, key="poster", sources=[f"{tmp}/a.png"])
+            ok("set_image_field item single ref", it and it["fields"]["poster"] == "img:" + a1["hash"], (it, e))
+            raw = httpx.get(f"{URL}/api/items/{iid}").json()["fields"]["poster"]
+            ok("stored as single ref", raw == {"hash": a1["hash"]}, raw)
+            it, e = await call("set_image_field", owner="item", id=iid, key="poster", sources=[f"{tmp}/b.jpg"], append=True)
+            ok("append gives list", it and isinstance(it["fields"]["poster"], list) and len(it["fields"]["poster"]) == 2
+               and it["fields"]["poster"][0] == "img:" + a1["hash"], (it, e))
+            it, e = await call("set_image_field", owner="item", id=iid, key="poster", sources=[a1["hash"]])
+            ok("single source on list field stays list (hash source)", it and it["fields"]["poster"] == ["img:" + a1["hash"]], (it, e))
+            it, e = await call("get_item", item_id=iid, full=True)
+            ok("get_item full keeps raw refs", it and it["fields"]["poster"] == [{"hash": a1["hash"]}], (it, e))
+            it, e = await call("get_item", item_id=iid)
+            ok("get_item slim compacts images", it and it["fields"]["poster"] == ["img:" + a1["hash"]], (it, e))
+            _, e = await call("set_image_field", owner="item", id=iid, key="poster", sources=["f" * 64])
+            ok("unknown hash rejected", e is not None and "400" in e, e)
+            pp, e = await call("create_person", name="Photo Person")
+            pp_id = pp["id"]
+            pp, e = await call("set_image_field", owner="person", id=pp_id, key="poster", sources=[f"{tmp}/b.jpg"])
+            ok("set_image_field person", pp and pp["fields"]["poster"].startswith("img:"), (pp, e))
+            pp, e = await call("get_person", person_id=pp_id)
+            ok("get_person compacts image", pp and pp["fields"]["poster"].startswith("img:"), (pp, e))
+            _, e = await call("delete_person", person_id=pp_id)
+            ok("cleanup image person", e is None, e)
+
             p, e = await call("create_person", name="Jane Tester", bio="b")
             ok("create_person", p and p["name"] == "Jane Tester", (p, e))
             pid = p["id"]
@@ -126,8 +178,8 @@ async def main():
             rel, e = await call("create_relation", type="Collection", name="Smoke Set", members=[{"item_id": iid, "role": "main"}])
             ok("create_relation", rel and rel["type"] == "collection" and rel["member_count"] == 1, (rel, e))
             rid = rel["id"]
-            rel, e = await call("update_relation", relation_id=rid, name="Renamed", props={"a": 1})
-            ok("update_relation", rel and rel["name"] == "Renamed" and rel["props"] == {"a": 1}, (rel, e))
+            rel, e = await call("update_relation", relation_id=rid, name="Renamed")
+            ok("update_relation (no props)", rel and rel["name"] == "Renamed" and "props" not in rel, (rel, e))
             rel, e = await call("get_relation", relation_id=rid)
             ok("get_relation", rel and rel["members"][0]["item_id"] == iid, (rel, e))
             ir, e = await call("get_item_relations", item_id=iid)
