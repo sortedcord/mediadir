@@ -97,7 +97,7 @@ fun FieldSettingsScreen(nav: Nav, vm: FieldSettingsViewModel = viewModel()) {
 }
 
 private fun defaultWidget(type: String) = when (type) {
-    "tags" -> "tags"; "rating" -> "rating"; "url" -> "link"; "person" -> "people"; "bool" -> "badge"; else -> "text"
+    "tags" -> "tags"; "rating" -> "rating"; "url" -> "link"; "person" -> "people"; "bool" -> "badge"; "image" -> "image"; else -> "text"
 }
 
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalLayoutApi::class)
@@ -123,7 +123,7 @@ private fun FieldSheet(f: FieldDefinition, isNew: Boolean, onDismiss: () -> Unit
             OutlinedTextField(label, { label = it }, label = { Text("Label") }, singleLine = true, modifier = Modifier.fillMaxWidth())
             if (isNew) {
                 Label("Type")
-                Choices(Kinds.FIELD_TYPES, type) { type = it; widget = defaultWidget(it) }
+                Choices(Kinds.FIELD_TYPES, type) { type = it; widget = defaultWidget(it); if (it == "image") placement = "hidden" }
             }
             if (!f.builtin) {
                 Label("Applies to (none = all kinds)")

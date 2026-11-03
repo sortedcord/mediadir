@@ -1,5 +1,18 @@
 package dev.sortedcord.mediadir.ui.components
 
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.background
+import androidx.compose.foundation.lazy.LazyRow
+import androidx.compose.foundation.lazy.itemsIndexed
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.automirrored.filled.ArrowForward
+import androidx.compose.material.icons.filled.AddPhotoAlternate
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.platform.LocalContext
+import dev.sortedcord.mediadir.domain.ImagePolicy
+import kotlinx.coroutines.launch
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.material.icons.Icons
@@ -37,7 +50,7 @@ fun PersonPicker(onPick: (Person?, String?) -> Unit, allowCreate: Boolean = true
         OutlinedTextField(q, { q = it }, label = { Text(label) }, singleLine = true, modifier = Modifier.fillMaxWidth())
         results.forEach { p ->
             Row(Modifier.fillMaxWidth().clickable { onPick(p, null); q = "" }.padding(vertical = 6.dp), verticalAlignment = Alignment.CenterVertically) {
-                Avatar(p.image, p.name, 32.dp); Spacer(Modifier.width(10.dp))
+                Avatar(p.id, p.name, 32.dp); Spacer(Modifier.width(10.dp))
                 Text(p.name, Modifier.weight(1f)); Text("${p.creditCount}", color = Muted, fontSize = 12.sp)
             }
         }
@@ -79,6 +92,7 @@ fun FieldEditor(def: FieldDefinition, value: Any?, people: List<PersonRef>, onSe
                     IconButton(onClick = { onSet(r.toDouble()) }) { Icon(Icons.Default.Check, "Save", tint = Accent) }
                 }
             }
+            "image" -> ImageFieldEditor(value, onSet, onClear)
             "person" -> {
                 val ids = when (value) { is List<*> -> value.mapNotNull { it?.toString() }; null -> emptyList(); else -> listOf(value.toString()) }
                 val multi = value is List<*> || value == null
@@ -120,5 +134,53 @@ fun FieldEditor(def: FieldDefinition, value: Any?, people: List<PersonRef>, onSe
                 )
             }
         }
+    }
+}
+
+/** Lists current images, adds from the document picker (upload to /api/assets, then [onSet]), removes and reorders. */
+@Composable
+fun ImageFieldEditor(value: Any?, onSet: (Any?) -> Unit, onClear: () -> Unit) {
+    val ctx = LocalContext.current
+    val scope = rememberCoroutineScope()
+    val hashes = ImagePolicy.hashes(value)
+    var busy by remember { mutableStateOf(false) }
+    var error by remember { mutableStateOf<String?>(null) }
+    fun commit(list: List<String>) {
+        when (list.size) { 0 -> onClear(); 1 -> onSet(mapOf("hash" to list[0])); else -> onSet(list.map { mapOf("hash" to it) }) }
+    }
+    val picker = rememberLauncherForActivityResult(ActivityResultContracts.OpenMultipleDocuments()) { uris ->
+        if (uris.isEmpty()) return@rememberLauncherForActivityResult
+        scope.launch {
+            busy = true; error = null
+            try {
+                val added = uris.map { uri ->
+                    Graph.repo.uploadAsset { ctx.contentResolver.openInputStream(uri) ?: throw java.io.IOException("Cannot open $uri") }.hash
+                }
+                commit((hashes + added).distinct())
+            } catch (e: Exception) { error = e.message ?: "Upload failed" }
+            finally { busy = false }
+        }
+    }
+    Column {
+        if (hashes.isNotEmpty()) LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            itemsIndexed(hashes, key = { _, h -> h }) { i, h ->
+                Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                    Box(Modifier.size(96.dp).clip(RoundedCornerShape(8.dp)).background(CardBg)) { AssetImage(h, 96.dp, 96.dp) }
+                    Row {
+                        IconButton(enabled = i > 0, onClick = { commit(hashes.toMutableList().also { it.add(i - 1, it.removeAt(i)) }) }, modifier = Modifier.size(32.dp)) {
+                            Icon(Icons.AutoMirrored.Filled.ArrowBack, "Move earlier", modifier = Modifier.size(18.dp))
+                        }
+                        IconButton(onClick = { commit(hashes - h) }, modifier = Modifier.size(32.dp)) { Icon(Icons.Default.Close, "Remove", modifier = Modifier.size(18.dp)) }
+                        IconButton(enabled = i < hashes.lastIndex, onClick = { commit(hashes.toMutableList().also { it.add(i + 1, it.removeAt(i)) }) }, modifier = Modifier.size(32.dp)) {
+                            Icon(Icons.AutoMirrored.Filled.ArrowForward, "Move later", modifier = Modifier.size(18.dp))
+                        }
+                    }
+                }
+            }
+        }
+        OutlinedButton(enabled = !busy, onClick = { picker.launch(arrayOf("image/*")) }) {
+            Icon(Icons.Default.AddPhotoAlternate, null); Spacer(Modifier.width(6.dp)); Text(if (busy) "Uploading…" else "Add image")
+        }
+        error?.let { Text(it, color = Accent, fontSize = 12.sp) }
     }
 }

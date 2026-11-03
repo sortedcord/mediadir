@@ -38,7 +38,7 @@ internal object Json {
 
     fun library(o: JSONObject) = Library(o.optString("id"), o.optString("name"), o.optString("kind"), o.str("path"), o.int("item_count") ?: 0, o.optBoolean("scanning"))
 
-    fun personRef(o: JSONObject) = PersonRef(o.optString("id"), o.optString("name"), o.str("image"))
+    fun personRef(o: JSONObject) = PersonRef(o.optString("id"), o.optString("name"))
 
     fun block(o: JSONObject) = DisplayBlock(
         key = o.optString("key"), label = o.optString("label"), type = o.optString("type", "text"),
@@ -48,16 +48,19 @@ internal object Json {
         people = o.arr("people").map(::personRef),
     )
 
-    fun images(o: JSONObject?) = Images(o?.str("thumb"), o?.str("poster"), o?.str("backdrop"),
-        o?.str("banner"), o?.str("clearlogo"), o?.str("landscape"), o?.str("discart"))
-
     fun summary(o: JSONObject) = ItemSummary(
         id = o.optString("id"), kind = o.optString("kind"), libraryId = o.str("library_id"), parentId = o.str("parent_id"),
         title = o.optString("title"), subtitle = o.str("subtitle"), year = o.int("year"), index = o.int("index"),
         parentIndex = o.int("parent_index"), duration = o.dbl("duration"), playable = o.optBoolean("playable"),
-        childCount = o.int("child_count"), aspect = o.str("aspect") ?: "landscape", images = images(o.optJSONObject("images")),
+        childCount = o.int("child_count"), aspect = o.str("aspect") ?: "landscape",
         addedAt = o.long("added_at"), card = o.arr("card").map(::block).sortedBy { it.order }, indexEnd = o.int("index_end"),
     )
+
+    fun relationSummary(o: JSONObject) = RelationSummary(
+        o.optString("id"), o.optString("type"), (o.str("name") ?: o.str("label"))?.ifBlank { null }, o.int("member_count") ?: 0, o.int("ord"), o.str("role")?.ifBlank { null })
+
+    fun relationDetail(o: JSONObject) = RelationDetail(relationSummary(o),
+        o.arr("members").map { RelationMember(it.optString("item_id"), it.int("ord") ?: 0, it.str("role")?.ifBlank { null }, summary(it.optJSONObject("item") ?: JSONObject())) })
 
     fun file(o: JSONObject) = MediaFile(
         id = o.optString("id"), path = o.str("path"), label = o.optString("label"), original = o.optBoolean("original", true),
@@ -84,9 +87,10 @@ internal object Json {
         children = o.arr("children").map(::summary), fields = fieldsMap(o.optJSONObject("fields")),
         display = o.arr("display").map(::block).sortedBy { it.order },
         extras = o.arr("extras").map(::summary),
+        relations = o.arr("relations").map(::relationSummary),
     )
 
-    fun person(o: JSONObject) = Person(o.optString("id"), o.optString("name"), o.str("sort_name"), o.str("image"), o.int("credit_count") ?: 0)
+    fun person(o: JSONObject) = Person(o.optString("id"), o.optString("name"), o.str("sort_name"), o.int("credit_count") ?: 0)
 
     fun personDetail(o: JSONObject) = PersonDetail(
         person = person(o), bio = o.str("bio"), birthDate = o.str("birth_date"), fields = fieldsMap(o.optJSONObject("fields")),

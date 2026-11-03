@@ -36,5 +36,14 @@ class Settings(ctx: Context) {
         else -> server + (if (path.startsWith("/")) path else "/$path")
     }
 
+    /** Asset URL; the server never upscales. Sizes are in pixels. */
+    fun asset(hash: String, w: Int? = null, h: Int? = null, fit: String? = null): String = buildString {
+        append(server).append("/asset/").append(hash)
+        append("?fmt=webp")
+        if (w != null) append("&w=").append(w)
+        if (h != null) append("&h=").append(h)
+        if (w != null && h != null && fit != null) append("&fit=").append(fit)
+    }
+
     companion object { const val DEFAULT_SERVER = "http://192.168.0.113:8096" }
 }

@@ -39,6 +39,8 @@ interface MediaRepository {
     suspend fun deleteItem(id: String)
     suspend fun deleteFile(id: String)
     suspend fun pollIngest()
+    suspend fun relation(id: String): RelationDetail
+    suspend fun uploadAsset(open: () -> java.io.InputStream): UploadedAsset
 }
 
 class HttpMediaRepository(private val settings: Settings) : MediaRepository {
@@ -130,6 +132,21 @@ class HttpMediaRepository(private val settings: Settings) : MediaRepository {
     override suspend fun pollIngest() { call("POST", "/api/ingest/scan") }
     override suspend fun ingestStatus() = Json.ingestStatus(obj(call("GET", "/api/ingest/status")))
     override suspend fun ingests() = (call("GET", "/api/ingest?limit=100") as? JSONArray ?: JSONArray()).let { a -> with(Json) { a.map(::ingest) } }
+    override suspend fun relation(id: String) = Json.relationDetail(obj(call("GET", "/api/relations/$id")))
+    override suspend fun uploadAsset(open: () -> java.io.InputStream): UploadedAsset = withContext(Dispatchers.IO) {
+        val c = URL(base + "/api/assets").openConnection() as HttpURLConnection
+        try {
+            c.requestMethod = "POST"; c.connectTimeout = 5000; c.readTimeout = 120000
+            c.doOutput = true; c.setChunkedStreamingMode(64 * 1024)
+            c.setRequestProperty("Content-Type", "application/octet-stream")
+            open().use { input -> c.outputStream.use { output -> input.copyTo(output) } }
+            val code = c.responseCode
+            val text = (if (code >= 400) c.errorStream else c.inputStream)?.bufferedReader()?.use { it.readText() } ?: ""
+            val j = runCatching { JSONObject(text) }.getOrDefault(JSONObject())
+            if (code >= 400) throw ApiException(code, j.optString("error").ifBlank { "HTTP $code" })
+            with(Json) { UploadedAsset(j.optString("hash"), j.str("mime"), j.int("width"), j.int("height"), j.long("size")) }
+        } finally { c.disconnect() }
+    }
     override suspend fun deleteItem(id: String) { call("DELETE", "/api/items/$id") }
     override suspend fun deleteFile(id: String) { call("DELETE", "/api/files/$id") }
 

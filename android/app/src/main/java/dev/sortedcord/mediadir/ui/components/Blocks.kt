@@ -23,6 +23,8 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import dev.sortedcord.mediadir.domain.DisplayBlock
+import dev.sortedcord.mediadir.domain.ImagePolicy
+import androidx.compose.ui.draw.clip
 import dev.sortedcord.mediadir.ui.*
 
 /** Values of a block as a list of strings (tags/genres arrays or a single text). */
@@ -83,6 +85,9 @@ fun BlockInline(b: DisplayBlock, onPerson: (String) -> Unit) {
             if (b.people.isEmpty()) Chip(b.text, color)
             b.people.forEach { p -> Chip(p.name, color) { onPerson(p.id) } }
         }
+        "image" -> Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+            ImagePolicy.hashes(b.value).forEach { h -> Box(Modifier.size(96.dp).clip(RoundedCornerShape(8.dp))) { AssetImage(h, 96.dp, 96.dp) } }
+        }
         "stat" -> Text(b.text, fontSize = 15.sp, fontWeight = FontWeight.Bold, color = parseColor(b.color, Color.White))
         else -> Text(b.text, fontSize = 13.sp, color = if (b.color != null) color else Color.White)
     }
@@ -122,12 +127,15 @@ fun SectionBlock(b: DisplayBlock, onPerson: (String) -> Unit) {
         SectionTitle(b.label)
         when (b.widget) {
             "people" -> LazyRow(contentPadding = PaddingValues(horizontal = 16.dp), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                items(b.people, key = { it.id }) { p -> PersonTile(p.id, p.name, p.image, null, onPerson) }
+                items(b.people, key = { it.id }) { p -> PersonTile(p.id, p.name, null, onPerson) }
             }
             "markdown", "text" -> Column(Modifier.padding(horizontal = 16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 b.text.split(Regex("\n\\s*\n")).map { it.trim() }.filter { it.isNotEmpty() }.forEach {
                     Text(it.replace(Regex("[*_`#>]+"), ""), fontSize = 14.sp, color = Color(0xFFD6D6DE), lineHeight = 20.sp)
                 }
+            }
+            "image" -> LazyRow(contentPadding = PaddingValues(horizontal = 16.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                items(ImagePolicy.hashes(b.value)) { h -> Box(Modifier.height(160.dp).widthIn(max = 280.dp).aspectRatio(4f / 3f).clip(RoundedCornerShape(8.dp))) { AssetImage(h, 280.dp, 160.dp, fit = "contain") } }
             }
             "stat" -> Text(b.text, fontSize = 28.sp, fontWeight = FontWeight.Bold, color = parseColor(b.color, Accent), modifier = Modifier.padding(horizontal = 16.dp))
             else -> Box(Modifier.padding(horizontal = 16.dp)) { BlockInline(b, onPerson) }

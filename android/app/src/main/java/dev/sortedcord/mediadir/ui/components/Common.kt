@@ -9,6 +9,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Person
 import androidx.compose.material3.*
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.produceState
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -19,7 +20,6 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import coil.compose.AsyncImage
 import dev.sortedcord.mediadir.data.Graph
 import dev.sortedcord.mediadir.ui.*
 
@@ -37,19 +37,20 @@ fun <T> StateContent(state: UiState<T>, onRetry: () -> Unit, content: @Composabl
 }
 
 @Composable
-fun Avatar(path: String?, name: String, size: Dp, modifier: Modifier = Modifier) {
+fun Avatar(personId: String?, name: String, size: Dp, modifier: Modifier = Modifier, hash: String? = null) {
+    val photo = hash ?: personId?.let { id -> produceState<String?>(null, id) { value = ImageResolver.person(id) }.value }
     Box(modifier.size(size).clip(CircleShape).background(CardBg), contentAlignment = Alignment.Center) {
         val initials = name.split(' ').filter { it.isNotBlank() }.take(2).joinToString("") { it.take(1).uppercase() }
         if (initials.isNotEmpty()) Text(initials, color = Muted, fontSize = (size.value / 3).sp)
         else Icon(Icons.Default.Person, null, tint = Muted)
-        Graph.settings.url(path)?.let { AsyncImage(it, name, Modifier.fillMaxSize(), contentScale = ContentScale.Crop) }
+        AssetImage(photo, size, size, description = name)
     }
 }
 
 @Composable
-fun PersonTile(id: String, name: String, image: String?, caption: String?, onClick: (String) -> Unit) {
+fun PersonTile(id: String, name: String, caption: String?, onClick: (String) -> Unit, hash: String? = null) {
     Column(Modifier.width(84.dp).clickable { onClick(id) }, horizontalAlignment = Alignment.CenterHorizontally) {
-        Avatar(image, name, 72.dp)
+        Avatar(id, name, 72.dp, hash = hash)
         Spacer(Modifier.height(6.dp))
         Text(name, fontSize = 12.sp, maxLines = 2, overflow = TextOverflow.Ellipsis, textAlign = TextAlign.Center, color = Color.White)
         caption?.let { Text(it, fontSize = 11.sp, color = Muted, maxLines = 1, overflow = TextOverflow.Ellipsis, textAlign = TextAlign.Center) }

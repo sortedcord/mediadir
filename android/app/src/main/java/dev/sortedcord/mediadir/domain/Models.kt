@@ -2,20 +2,7 @@ package dev.sortedcord.mediadir.domain
 
 data class Library(val id: String, val name: String, val kind: String, val path: String?, val itemCount: Int, val scanning: Boolean)
 
-data class Images(
-    val thumb: String?, val poster: String?, val backdrop: String?,
-    val banner: String? = null, val clearlogo: String? = null, val landscape: String? = null, val discart: String? = null,
-) {
-    /** Best image for a card of the given aspect. */
-    fun forAspect(aspect: String): String? = when (aspect) {
-        "poster" -> poster ?: thumb ?: backdrop
-        "landscape" -> thumb ?: landscape ?: backdrop ?: banner ?: poster
-        else -> thumb ?: poster ?: backdrop
-    }
-    val hero: String? get() = backdrop ?: landscape ?: thumb ?: poster
-}
-
-data class PersonRef(val id: String, val name: String, val image: String?)
+data class PersonRef(val id: String, val name: String)
 
 data class DisplayBlock(
     val key: String, val label: String, val type: String, val widget: String, val placement: String,
@@ -26,9 +13,12 @@ data class DisplayBlock(
 data class ItemSummary(
     val id: String, val kind: String, val libraryId: String?, val parentId: String?, val title: String,
     val subtitle: String?, val year: Int?, val index: Int?, val parentIndex: Int?, val duration: Double?,
-    val playable: Boolean, val childCount: Int?, val aspect: String, val images: Images, val addedAt: Long?,
+    val playable: Boolean, val childCount: Int?, val aspect: String, val addedAt: Long?,
     val card: List<DisplayBlock>, val indexEnd: Int? = null,
 ) {
+    /** Image-typed field values visible in the summary (only fields with a card placement). Input for [ImagePolicy]. */
+    val imageValues: Map<String, Any?> get() = card.filter { it.type == "image" }.associate { it.key to it.value }
+
     /** "E01" or "E01–E02" for multi-episode files. */
     val episodeLabel: String? get() = index?.let { i -> "E%02d".format(i) + (indexEnd?.takeIf { it > i }?.let { "–E%02d".format(it) } ?: "") }
 }
@@ -64,9 +54,10 @@ data class ItemDetail(
     val locked: List<String>, val breadcrumbs: List<Breadcrumb>, val files: List<MediaFile>,
     val credits: List<Credit>, val children: List<ItemSummary>, val fields: Map<String, Any?>,
     val display: List<DisplayBlock>, val extras: List<ItemSummary> = emptyList(),
+    val relations: List<RelationSummary> = emptyList(),
 )
 
-data class Person(val id: String, val name: String, val sortName: String?, val image: String?, val creditCount: Int)
+data class Person(val id: String, val name: String, val sortName: String?, val creditCount: Int)
 data class PersonCredit(val id: String, val role: String, val character: String?, val item: ItemSummary)
 data class PersonDetail(
     val person: Person, val bio: String?, val birthDate: String?, val fields: Map<String, Any?>,
@@ -89,9 +80,9 @@ data class SearchResult(val items: List<ItemSummary>, val people: List<Person>)
 object Kinds {
     val ITEM_KINDS = listOf("movie", "show", "season", "episode", "artist", "album", "track", "music_video", "video")
     val LIBRARY_KINDS = listOf("movies", "shows", "music", "music_videos", "videos")
-    val FIELD_TYPES = listOf("text", "number", "date", "url", "tags", "rating", "bool", "duration", "person")
+    val FIELD_TYPES = listOf("text", "number", "date", "url", "tags", "rating", "bool", "duration", "person", "image")
     val PLACEMENTS = listOf("card_badge", "card_meta", "header", "info", "section", "hidden")
-    val WIDGETS = listOf("badge", "chip", "text", "rating", "link", "tags", "people", "markdown", "stat")
+    val WIDGETS = listOf("badge", "chip", "text", "rating", "link", "tags", "people", "markdown", "stat", "image")
     val ROLES = listOf("actor", "director", "writer", "producer", "artist", "album_artist", "featured", "singer", "composer", "lyricist", "dancer", "guest", "creator")
 }
 
@@ -102,3 +93,8 @@ data class IngestStatus(
     val watching: Boolean, val pollSecs: Int, val queue: Int, val settling: Int, val active: Int,
     val lastSidecarSync: Long?, val lastVerify: Long?, val lastBackup: Long?, val problems: List<StorageProblem>,
 )
+
+data class RelationSummary(val id: String, val type: String, val name: String?, val memberCount: Int, val ord: Int? = null, val role: String? = null)
+data class RelationMember(val itemId: String, val ord: Int, val role: String?, val item: ItemSummary)
+data class RelationDetail(val summary: RelationSummary, val members: List<RelationMember>)
+data class UploadedAsset(val hash: String, val mime: String?, val width: Int?, val height: Int?, val size: Long?)

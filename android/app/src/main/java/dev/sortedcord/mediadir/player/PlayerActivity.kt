@@ -1,5 +1,7 @@
 package dev.sortedcord.mediadir.player
 
+import dev.sortedcord.mediadir.domain.ImagePolicy
+import dev.sortedcord.mediadir.ui.components.ImageResolver
 import android.app.AlertDialog
 import android.app.PictureInPictureParams
 import android.content.Context
@@ -485,7 +487,7 @@ class PlayerActivity : ComponentActivity(), GestureLayer.Listener {
 
     private fun mediaItem(i: Int): MediaItem {
         val e = queue[i]; val f = chosen[i] ?: e.files.first()
-        val art = settings.url(e.item.images.thumb ?: e.item.images.poster)
+        val art = ImagePolicy.card(e.item.imageValues)?.let { settings.asset(it, 512) }
         val subs = f.subtitles.mapNotNull { s ->
             val u = settings.url(s.external) ?: return@mapNotNull null
             MediaItem.SubtitleConfiguration.Builder(Uri.parse(u))
@@ -519,8 +521,11 @@ class PlayerActivity : ComponentActivity(), GestureLayer.Listener {
         if (audio) zoom.reset()
         audioTitle.text = e.item.title; audioSub.text = e.item.subtitle ?: ""
         artView.setImageDrawable(null)
-        if (audio) settings.url(e.item.images.thumb ?: e.item.images.poster)?.let {
-            Coil.imageLoader(this).enqueue(ImageRequest.Builder(this).data(it).target(artView).build())
+        if (audio) lifecycleScope.launch {
+            val h = ImageResolver.card(e.item) ?: return@launch
+            if (queue.getOrNull(currentIndex())?.item?.id != e.item.id) return@launch
+            val u = settings.asset(h, 768)
+            Coil.imageLoader(this@PlayerActivity).enqueue(ImageRequest.Builder(this@PlayerActivity).data(u).memoryCacheKey(u).target(artView).build())
         }
         titleView.text = e.item.title
         subView.text = listOfNotNull(

@@ -60,7 +60,7 @@ class ItemViewModel(val id: String) : LoadViewModel<ItemDetail>() {
 
     /** Runs an edit returning the new detail. */
     fun edit(block: suspend () -> ItemDetail) = viewModelScope.launch {
-        runCatching { block() }.onSuccess { _state.value = UiState.Ready(it) }.onFailure { message.value = it.message }
+        runCatching { block() }.onSuccess { ImageResolver.clear(); _state.value = UiState.Ready(it) }.onFailure { message.value = it.message }
     }
 }
 
@@ -129,20 +129,27 @@ fun RoundIcon(onClick: () -> Unit, content: @Composable () -> Unit) {
 private fun ItemContent(nav: Nav, vm: ItemViewModel, d: ItemDetail, resumeTick: Int, bottom: androidx.compose.ui.unit.Dp, onDeleteFile: (MediaFile) -> Unit) {
     val s = d.summary
     val settings = Graph.settings
-    val header = d.display.filter { it.placement == "header" }
+    val header = d.display.filter { it.placement == "header" && it.type != "image" }
     val pos = remember(resumeTick, s.id) { settings.position(s.id) }
     LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(bottom = bottom + 24.dp)) {
         item {
-            Box(Modifier.fillMaxWidth().height(if (s.aspect == "landscape" || s.images.backdrop != null) 260.dp else 220.dp)) {
-                settings.url(s.images.hero)?.let { AsyncImage(it, null, Modifier.fillMaxSize(), contentScale = ContentScale.Crop) }
+            val own = remember(d) { ImagePolicy.card(d.fields) ?: ImagePolicy.card(s.imageValues) }
+            val explicitBackdrop = remember(d) { ImagePolicy.backdropOnly(d.fields) }
+            // Parent-chain fallback only when this item has no image of its own.
+            val inherited by produceState<String?>(null, d, own) {
+                value = if (own != null || s.parentId == null) null else ImageResolver.byId(s.parentId)
+            }
+            val card = own ?: inherited
+            val hero = ImagePolicy.backdrop(d.fields) ?: card
+            Box(Modifier.fillMaxWidth().height(if (s.aspect == "landscape" || explicitBackdrop != null) 260.dp else 220.dp)) {
+                AssetImage(hero, 480.dp, 260.dp, description = s.title)
                 Box(Modifier.fillMaxSize().background(Brush.verticalGradient(listOf(Color.Transparent, Bg.copy(alpha = 0.6f), Bg))))
-                val poster = if (s.aspect != "landscape") settings.url(s.images.forAspect(s.aspect)) else null
-                if (poster != null && s.images.backdrop != null) {
-                    AsyncImage(poster, null, Modifier.align(Alignment.BottomStart).padding(16.dp).width(if (s.aspect == "poster") 90.dp else 110.dp)
-                        .aspectRatio(aspectRatio(s.aspect)).clip(RoundedCornerShape(8.dp)), contentScale = ContentScale.Crop)
-                } else if (s.kind == "album" && s.images.discart != null) {
-                    AsyncImage(settings.url(s.images.discart), null, Modifier.align(Alignment.BottomEnd).padding(16.dp).size(110.dp).clip(CircleShape), contentScale = ContentScale.Crop)
-                } else if (s.images.hero == null) {
+                if (own != null && explicitBackdrop != null && s.aspect != "landscape") {
+                    Box(Modifier.align(Alignment.BottomStart).padding(16.dp).width(if (s.aspect == "poster") 90.dp else 110.dp)
+                        .aspectRatio(aspectRatio(s.aspect)).clip(RoundedCornerShape(8.dp))) {
+                        AssetImage(own, 110.dp, 110.dp / aspectRatio(s.aspect))
+                    }
+                } else if (hero == null) {
                     Text(s.title.take(1), fontSize = 64.sp, color = Muted, modifier = Modifier.align(Alignment.Center))
                 }
             }
@@ -154,10 +161,7 @@ private fun ItemContent(nav: Nav, vm: ItemViewModel, d: ItemDetail, resumeTick: 
                         Text(b.title + if (i < d.breadcrumbs.lastIndex) "  ›  " else "", color = Accent, fontSize = 13.sp, modifier = Modifier.clickable { nav.item(b.id) })
                     }
                 }
-                val logo = settings.url(s.images.clearlogo)
-                if (logo != null) AsyncImage(logo, s.title, Modifier.padding(vertical = 4.dp).heightIn(max = 90.dp).fillMaxWidth(0.7f),
-                    contentScale = ContentScale.Fit, alignment = Alignment.CenterStart)
-                else Text(s.title, style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold, color = Color.White)
+                Text(s.title, style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold, color = Color.White)
                 s.subtitle?.takeIf { it.isNotBlank() }?.let { Text(it, color = Muted, fontSize = 14.sp) }
                 Spacer(Modifier.height(8.dp))
                 HeaderBlocks(header, nav::person)
@@ -198,11 +202,37 @@ private fun ItemContent(nav: Nav, vm: ItemViewModel, d: ItemDetail, resumeTick: 
             SectionTitle("Cast & crew")
             LazyRow(contentPadding = PaddingValues(horizontal = 16.dp), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
                 items(d.credits, key = { it.id }) { c ->
-                    PersonTile(c.person.id, c.person.name, c.person.image, c.character ?: c.role.titleCase(), nav::person)
+                    PersonTile(c.person.id, c.person.name, c.character ?: c.role.titleCase(), nav::person)
                 }
             }
         }
+        relationsSection(nav, d)
         children(nav, vm, d)
+    }
+}
+
+private fun LazyListScope.relationsSection(nav: Nav, d: ItemDetail) {
+    if (d.relations.isEmpty()) return
+    item(key = "relations") {
+        val details by produceState<List<RelationDetail>>(emptyList(), d.relations) {
+            value = d.relations.mapNotNull { r -> runCatching { Graph.repo.relation(r.id) }.getOrNull() }
+        }
+        Column {
+            details.groupBy { it.summary.type }.forEach { (type, rels) ->
+                rels.forEach { r ->
+                    SectionTitle((r.summary.name ?: type.replace('_', ' ').titleCase()).let { if (r.summary.name != null) "$it · ${type.replace('_', ' ')}" else it })
+                    LazyRow(contentPadding = PaddingValues(horizontal = 16.dp), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                        items(r.members, key = { it.itemId }) { m ->
+                            Column(Modifier.width(cardWidth(m.item.aspect))) {
+                                MediaCard(m.item, onClick = { nav.item(it.id) })
+                                m.role?.let { Text(it, color = Muted, fontSize = 11.sp, maxLines = 1) }
+                                if (m.itemId == d.summary.id) Text("This item", color = Accent, fontSize = 11.sp)
+                            }
+                        }
+                    }
+                }
+            }
+        }
     }
 }
 
@@ -252,7 +282,7 @@ private fun LazyListScope.children(nav: Nav, vm: ItemViewModel, d: ItemDetail) {
 private fun EpisodeRow(e: ItemSummary, nav: Nav) {
     Row(Modifier.fillMaxWidth().clickable { nav.item(e.id) }.padding(horizontal = 16.dp, vertical = 8.dp), verticalAlignment = Alignment.CenterVertically) {
         Box(Modifier.width(150.dp).aspectRatio(16f / 9f).clip(RoundedCornerShape(8.dp)).background(CardBg)) {
-            Graph.settings.url(e.images.forAspect("landscape"))?.let { AsyncImage(it, null, Modifier.fillMaxSize(), contentScale = ContentScale.Crop) }
+            AssetImage(rememberCardHash(e), 150.dp, 84.dp)
             Box(Modifier.align(Alignment.Center).size(32.dp).clip(CircleShape).background(Color.Black.copy(alpha = 0.5f)).clickable { nav.play(e.id) }, contentAlignment = Alignment.Center) {
                 Icon(Icons.Default.PlayArrow, "Play", tint = Color.White)
             }
