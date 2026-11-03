@@ -9,8 +9,10 @@ User=sortedcord
 Group=sortedcord
 WorkingDirectory=/home/sortedcord/mediadir/server
 ExecStart=/home/sortedcord/mediadir/server/target/release/mediadir-server
-Environment=DATA_DIR=/home/sortedcord/mediadir/server/data2
 Environment=BIND=0.0.0.0:8096
+Environment=DATA_DIR=/home/sortedcord/mediadir/server/data-v3
+Environment=MEDIA_DIR=/home/sortedcord/mediadir/server/store-v3
+Environment=INGEST_DIR=/home/sortedcord/mediadir/server/ingest-v3
 Environment=ASSET_DIR=/home/sortedcord/mediadir/server/assets-v3
 EnvironmentFile=-/home/sortedcord/mediadir/server/service.env
 Restart=on-failure
