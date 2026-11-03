@@ -102,6 +102,8 @@ impl<'r> Presenter<'r> {
             }
             let names = refs.iter().map(|p| p.name.clone()).collect::<Vec<_>>().join(", ");
             (names, Some(refs))
+        } else if def.field_type == FieldType::Image {
+            (String::new(), None)
         } else {
             (format_value(def, &value)?, None)
         };
@@ -255,7 +257,7 @@ mod tests {
         item.fields.insert("dancers".into(), json!(["p1", "missing"]));
         let files = vec![file(4320)];
         let mut people = HashMap::new();
-        people.insert("p1".to_string(), PersonRef { id: "p1".into(), name: "Nora Fatehi".into(), image: None });
+        people.insert("p1".to_string(), PersonRef { id: "p1".into(), name: "Nora Fatehi".into() });
         let ctx = PresentContext { item: &item, files: &files, parent: None, people: &people };
         let blocks = Presenter::new(&reg).detail(&ctx);
         let get = |k: &str| blocks.iter().find(|b| b.key == k);

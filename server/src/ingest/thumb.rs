@@ -1,4 +1,6 @@
-//! One generated thumbnail per video item (a single decoded frame; media is never transcoded).
+//! Single-frame grab helper. Not called at ingest any more (images are `image` field values);
+//! kept available for a future "populate a field from a frame" step.
+#![allow(dead_code)]
 
 use std::path::{Path, PathBuf};
 use std::process::Command;

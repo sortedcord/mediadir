@@ -1,17 +1,16 @@
-use super::{json_col, now, to_json, Repo};
+use super::{now, Repo};
 use crate::error::{AppError, AppResult};
-use crate::model::{fnv1a, Item, JsonMap};
+use crate::model::{fnv1a, Item};
 use rusqlite::{params, params_from_iter, OptionalExtension, Row};
 
 const COLS: &str =
-    "r.id, r.type, r.name, r.props, r.created_at, r.updated_at, (SELECT COUNT(*) FROM relation_members m WHERE m.relation_id = r.id)";
+    "r.id, r.type, r.name, r.created_at, r.updated_at, (SELECT COUNT(*) FROM relation_members m WHERE m.relation_id = r.id)";
 
 #[derive(Debug, Clone)]
 pub struct Relation {
     pub id: String,
     pub rtype: String,
     pub name: String,
-    pub props: JsonMap,
     pub created_at: i64,
     pub updated_at: i64,
     pub member_count: i64,
@@ -45,10 +44,9 @@ fn row_to_relation(r: &Row) -> rusqlite::Result<Relation> {
         id: r.get(0)?,
         rtype: r.get(1)?,
         name: r.get(2)?,
-        props: json_col(r.get(3)?),
-        created_at: r.get(4)?,
-        updated_at: r.get(5)?,
-        member_count: r.get(6)?,
+        created_at: r.get(3)?,
+        updated_at: r.get(4)?,
+        member_count: r.get(5)?,
     })
 }
 
@@ -113,19 +111,19 @@ impl Repo<'_> {
     }
 
     /// Insert the relation row only; members are added with [`Repo::set_relation_members`].
-    pub fn insert_relation(&self, id: &str, rtype: &str, name: &str, props: &JsonMap) -> AppResult<()> {
+    pub fn insert_relation(&self, id: &str, rtype: &str, name: &str) -> AppResult<()> {
         let t = now();
         self.conn.execute(
-            "INSERT INTO relations (id, type, name, props, created_at, updated_at) VALUES (?1,?2,?3,?4,?5,?5)",
-            params![id, rtype, name, to_json(props), t],
+            "INSERT INTO relations (id, type, name, created_at, updated_at) VALUES (?1,?2,?3,?4,?4)",
+            params![id, rtype, name, t],
         )?;
         Ok(())
     }
 
     pub fn update_relation(&self, r: &Relation) -> AppResult<()> {
         self.conn.execute(
-            "UPDATE relations SET type=?2, name=?3, props=?4, updated_at=?5 WHERE id=?1",
-            params![r.id, r.rtype, r.name, to_json(&r.props), now()],
+            "UPDATE relations SET type=?2, name=?3, updated_at=?4 WHERE id=?1",
+            params![r.id, r.rtype, r.name, now()],
         )?;
         Ok(())
     }
@@ -241,7 +239,7 @@ impl Repo<'_> {
              WHERE m.item_id = ?1 ORDER BY r.type, r.name COLLATE NOCASE, r.id"
         ))?;
         let rows = st
-            .query_map([item_id], |r| Ok(Membership { relation: row_to_relation(r)?, ord: r.get(7)?, role: r.get(8)? }))?
+            .query_map([item_id], |r| Ok(Membership { relation: row_to_relation(r)?, ord: r.get(6)?, role: r.get(7)? }))?
             .collect::<Result<Vec<_>, _>>()?;
         Ok(rows)
     }

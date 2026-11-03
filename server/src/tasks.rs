@@ -1,6 +1,8 @@
-//! Periodic durability tasks: sidecar manifests, integrity verification, database backups.
+//! Periodic durability tasks: sidecar manifests, integrity verification (media files and image
+//! assets), database backups, unreferenced-asset garbage collection.
 //! Results are reported at `GET /api/ingest/status`.
 
+use crate::assets::AssetService;
 use crate::config::Config;
 use crate::db::{now, now_ms, Db, Repo};
 use crate::error::AppResult;
@@ -33,12 +35,14 @@ pub struct TaskStatus {
     pub last_sidecar_sync: Option<i64>,
     pub last_verify: Option<i64>,
     pub last_backup: Option<i64>,
+    pub last_asset_gc: Option<i64>,
     pub problems: Vec<Problem>,
 }
 
 pub struct Maintenance {
     db: Db,
     store: Store,
+    assets: Arc<AssetService>,
     backups: PathBuf,
     cfg: Config,
 }
@@ -48,6 +52,7 @@ enum Task {
     Sidecars,
     Verify,
     Backup,
+    AssetGc,
 }
 
 impl Task {
@@ -56,13 +61,14 @@ impl Task {
             Task::Sidecars => "last_sidecar_sync",
             Task::Verify => "last_verify",
             Task::Backup => "last_backup",
+            Task::AssetGc => "last_asset_gc",
         }
     }
 }
 
 impl Maintenance {
-    pub fn new(db: Db, store: Store, cfg: &Config) -> Arc<Self> {
-        Arc::new(Maintenance { db, store, backups: cfg.data_dir.join("backups"), cfg: cfg.clone() })
+    pub fn new(db: Db, store: Store, assets: Arc<AssetService>, cfg: &Config) -> Arc<Self> {
+        Arc::new(Maintenance { db, store, assets, backups: cfg.data_dir.join("backups"), cfg: cfg.clone() })
     }
 
     pub fn spawn(self: &Arc<Self>) {
@@ -70,6 +76,7 @@ impl Maintenance {
             (Task::Sidecars, self.cfg.sidecar_interval),
             (Task::Verify, self.cfg.verify_interval),
             (Task::Backup, self.cfg.backup_interval),
+            (Task::AssetGc, self.cfg.asset_gc_interval),
         ] {
             let Some(every) = every else { continue };
             let me = self.clone();
@@ -103,6 +110,7 @@ impl Maintenance {
                 format!("verify: {} problem(s)", p.len())
             }
             Task::Backup => format!("backup: {}", self.backup()?.display()),
+            Task::AssetGc => format!("asset gc: removed {}", self.gc_assets(self.cfg.asset_gc_grace)?),
         };
         let conn = self.db.conn()?;
         Repo::new(&conn).meta_set(task.meta_key(), &now().to_string())?;
@@ -115,6 +123,7 @@ impl Maintenance {
             last_sidecar_sync: t("last_sidecar_sync")?,
             last_verify: t("last_verify")?,
             last_backup: t("last_backup")?,
+            last_asset_gc: t("last_asset_gc")?,
             problems: r.meta_get("problems")?.and_then(|v| serde_json::from_str(&v).ok()).unwrap_or_default(),
         })
     }
@@ -215,12 +224,45 @@ impl Maintenance {
             }
             repo.set_verified_at(&f.id, now_ms())?;
         }
+        // image assets: existence + size for all, a rotating slice re-hashed
+        let assets = repo.all_assets()?;
+        let aproblem = |kind: &str, a: &crate::db::Asset, detail: String| Problem {
+            problem: kind.into(),
+            file_id: format!("asset:{}", a.hash),
+            item_id: String::new(),
+            hash: a.hash.clone(),
+            path: self.assets.path(a).to_string_lossy().to_string(),
+            detail,
+            detected_at: now(),
+        };
+        let mut abad = HashSet::new();
+        for a in &assets {
+            match std::fs::metadata(self.assets.path(a)) {
+                Err(e) => problems.push(aproblem("missing", a, e.to_string())),
+                Ok(m) if m.len() != a.size => problems.push(aproblem("corrupt", a, format!("size is {} bytes, expected {}", m.len(), a.size))),
+                Ok(_) => continue,
+            }
+            abad.insert(a.hash.clone());
+        }
+        let aslice = assets.len().div_ceil(runs_per_week).max(1);
+        for a in repo.assets_due_for_rehash(aslice as i64)? {
+            rehashed.insert(format!("asset:{}", a.hash));
+            if !abad.contains(&a.hash) {
+                match hash_file(&self.assets.path(&a)) {
+                    Ok((h, _)) if h == a.hash => {}
+                    Ok((h, _)) => problems.push(aproblem("corrupt", &a, format!("content hash is {h}"))),
+                    Err(e) => problems.push(aproblem("missing", &a, e.to_string())),
+                }
+            }
+            repo.set_asset_verified(&a.hash)?;
+        }
         // hash mismatches found by earlier runs stay reported until that file is re-hashed again
-        let current: HashSet<&str> = files.iter().map(|s| s.file.id.as_str()).collect();
+        let mut current: HashSet<String> = files.iter().map(|s| s.file.id.clone()).collect();
+        current.extend(assets.iter().map(|a| format!("asset:{}", a.hash)));
         let previous: Vec<Problem> = repo.meta_get("problems")?.and_then(|v| serde_json::from_str(&v).ok()).unwrap_or_default();
         let reported: HashSet<String> = problems.iter().map(|p| p.file_id.clone()).collect();
         for p in previous {
-            if p.problem == "corrupt" && current.contains(p.file_id.as_str()) && !rehashed.contains(&p.file_id) && !reported.contains(&p.file_id) {
+            if p.problem == "corrupt" && current.contains(&p.file_id) && !rehashed.contains(&p.file_id) && !reported.contains(&p.file_id) {
                 problems.push(p);
             }
         }
@@ -229,6 +271,17 @@ impl Maintenance {
         }
         repo.meta_set("problems", &serde_json::to_string(&problems)?)?;
         Ok(problems)
+    }
+
+    /// Delete assets that no item/person field references and that are older than `grace`
+    /// (so a freshly uploaded asset survives until it is attached). Returns how many went.
+    pub fn gc_assets(&self, grace: Duration) -> AppResult<usize> {
+        let conn = self.db.conn()?;
+        let dead = Repo::new(&conn).gc_assets(now() - grace.as_secs() as i64)?;
+        for a in &dead {
+            self.assets.remove(a);
+        }
+        Ok(dead.len())
     }
 
     /// Online backup with `VACUUM INTO`, keeping the newest `BACKUP_KEEP`.

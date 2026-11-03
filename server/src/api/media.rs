@@ -1,9 +1,7 @@
-//! Byte serving: stored media (Range/HEAD via ServeFile), still frames, thumbnails.
+//! Byte serving: stored media (Range/HEAD via ServeFile) and still frames.
 
-use super::views::{resolve_image, SLOTS};
 use super::Shared;
 use crate::error::{AppError, AppResult};
-use crate::model::{ext_of, mime_for};
 use axum::{
     body::Body,
     extract::{Path, Request, State},
@@ -19,12 +17,10 @@ use tower_http::services::ServeFile;
 pub fn routes() -> Router<Shared> {
     Router::new()
         .route("/stream/{file_id}", get(stream).head(stream))
-        .route("/image/item/{id}/{slot}", get(item_image))
-        .route("/image/person/{id}", get(person_image))
         .route("/frame/{file_id}", get(frame))
 }
 
-async fn serve(path: PathBuf, mime: &str, req: Request) -> AppResult<Response> {
+pub(super) async fn serve(path: PathBuf, mime: &str, req: Request) -> AppResult<Response> {
     let mut r = ServeFile::new(path)
         .oneshot(req)
         .await
@@ -45,40 +41,6 @@ async fn stream(State(st): State<Shared>, Path(file_id): Path<String>, req: Requ
     let mut resp = serve(st.ingest.store.abs(&file.store_path), &file.mime, req).await?;
     resp.headers_mut().insert(header::ACCEPT_RANGES, HeaderValue::from_static("bytes"));
     Ok(resp)
-}
-
-fn cached(mut r: Response) -> Response {
-    r.headers_mut().insert(header::CACHE_CONTROL, HeaderValue::from_static("public, max-age=604800"));
-    r
-}
-
-async fn item_image(State(st): State<Shared>, Path((id, slot)): Path<(String, String)>, req: Request) -> AppResult<Response> {
-    if !SLOTS.contains(&slot.as_str()) {
-        return Err(AppError::bad(format!("slot must be one of {}", SLOTS.join(", "))));
-    }
-    let path = st
-        .db
-        .call(move |r| {
-            let item = r.get_item(&id)?;
-            resolve_image(r, &item, &slot)
-        })
-        .await?
-        .ok_or_else(|| AppError::not_found("image"))?;
-    let path = PathBuf::from(path);
-    let mime = mime_for(&ext_of(&path));
-    Ok(cached(serve(path, mime, req).await?))
-}
-
-async fn person_image(State(st): State<Shared>, Path(id): Path<String>, req: Request) -> AppResult<Response> {
-    let path = st
-        .db
-        .call(move |r| Ok(r.get_person(&id)?.image))
-        .await?
-        .filter(|p| std::path::Path::new(p).is_file())
-        .ok_or_else(|| AppError::not_found("image"))?;
-    let path = PathBuf::from(path);
-    let mime = mime_for(&ext_of(&path));
-    Ok(cached(serve(path, mime, req).await?))
 }
 
 #[derive(serde::Deserialize)]

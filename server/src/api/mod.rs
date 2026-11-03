@@ -1,5 +1,6 @@
 //! HTTP API: one router per resource, composed here.
 
+mod assets;
 mod fields;
 mod ingest;
 mod items;
@@ -23,6 +24,7 @@ pub struct AppState {
     pub db: Db,
     pub data_dir: PathBuf,
     pub frames: Arc<crate::frames::FrameService>,
+    pub assets: Arc<crate::assets::AssetService>,
     pub ingest: Arc<Ingest>,
     pub tasks: Arc<Maintenance>,
 }
@@ -39,6 +41,7 @@ pub fn router(state: Shared) -> Router {
         .merge(relations::routes())
         .merge(fields::routes())
         .merge(search::routes())
+        .merge(assets::routes())
         .layer(CompressionLayer::new());
     Router::new()
         .merge(api)

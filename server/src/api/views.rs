@@ -4,22 +4,10 @@ use crate::db::{Member, Membership, Relation, Repo};
 use crate::display::{FieldRegistry, PresentContext, Presenter};
 use crate::error::AppResult;
 use crate::model::{
-    fnv1a, AudioStream, Credit, DisplayBlock, Item, ItemKind, JsonMap, MediaFile, Person, PersonRef, VideoStream,
+    AudioStream, Credit, DisplayBlock, Item, ItemKind, JsonMap, MediaFile, Person, PersonRef, VideoStream,
 };
 use serde::Serialize;
 use std::collections::HashMap;
-use std::path::Path;
-
-/// Image slots. Only `thumb` (a generated frame) can be non-null in v3; the other slots keep
-/// the v2 response shape.
-#[derive(Serialize)]
-pub struct Images {
-    pub thumb: Option<String>,
-    pub poster: Option<String>,
-    pub backdrop: Option<String>,
-    #[serde(flatten)]
-    pub art: std::collections::BTreeMap<String, Option<String>>,
-}
 
 #[derive(Serialize)]
 pub struct ItemSummary {
@@ -37,7 +25,6 @@ pub struct ItemSummary {
     pub playable: bool,
     pub child_count: Option<i64>,
     pub aspect: &'static str,
-    pub images: Images,
     pub added_at: i64,
     pub card: Vec<DisplayBlock>,
 }
@@ -116,7 +103,6 @@ pub struct RelationSummary {
     #[serde(rename = "type")]
     pub rtype: String,
     pub name: String,
-    pub props: JsonMap,
     pub member_count: i64,
     pub created_at: i64,
     pub updated_at: i64,
@@ -151,7 +137,6 @@ pub struct PersonSummary {
     pub id: String,
     pub name: String,
     pub sort_name: Option<String>,
-    pub image: Option<String>,
     pub credit_count: i64,
 }
 
@@ -188,62 +173,8 @@ pub struct Playback {
     pub queue: Vec<QueueEntry>,
 }
 
-/// Version tag for image URLs so long cache lifetimes never serve stale artwork.
-fn version_of(path: &str) -> String {
-    let mtime = std::fs::metadata(path)
-        .and_then(|m| m.modified())
-        .ok()
-        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-        .map(|d| d.as_secs())
-        .unwrap_or(0);
-    fnv1a(&format!("{path}\u{0}{mtime}"))[..8].to_string()
-}
-
-pub fn person_image_url(p: &Person) -> Option<String> {
-    let img = p.image.as_ref().filter(|i| Path::new(i).is_file())?;
-    Some(format!("/image/person/{}?v={}", p.id, version_of(img)))
-}
-
 pub fn person_ref(p: &Person) -> PersonRef {
-    PersonRef { id: p.id.clone(), name: p.name.clone(), image: person_image_url(p) }
-}
-
-/// Image slots served under `/image/item/{id}/{slot}`.
-pub const SLOTS: &[&str] = &["thumb", "poster", "backdrop", "banner", "clearlogo", "clearart", "landscape", "discart", "keyart", "characterart"];
-
-fn own_thumb(item: &Item) -> Option<String> {
-    item.thumb.clone().filter(|p| Path::new(p).is_file())
-}
-
-/// Resolve an image: an item's own generated thumbnail; containers (show, season, artist) use
-/// their first child's, children without one fall back to their ancestors.
-pub fn resolve_image(repo: &Repo, item: &Item, slot: &str) -> AppResult<Option<String>> {
-    if slot != "thumb" {
-        return Ok(None);
-    }
-    if let Some(v) = own_thumb(item) {
-        return Ok(Some(v));
-    }
-    if !item.kind.playable() {
-        let mut level = repo.children(&item.id)?;
-        for _ in 0..3 {
-            if let Some(v) = level.iter().take(8).find_map(own_thumb) {
-                return Ok(Some(v));
-            }
-            let Some(first) = level.iter().find(|c| !c.kind.playable()) else { break };
-            level = repo.children(&first.id)?;
-        }
-    }
-    let mut cur = item.parent_id.clone();
-    for _ in 0..4 {
-        let Some(pid) = cur else { break };
-        let Some(parent) = repo.find_item(&pid)? else { break };
-        if let Some(v) = own_thumb(&parent) {
-            return Ok(Some(v));
-        }
-        cur = parent.parent_id.clone();
-    }
-    Ok(None)
+    PersonRef { id: p.id.clone(), name: p.name.clone() }
 }
 
 pub fn media_file_dto(f: &MediaFile) -> MediaFileDto {
@@ -298,13 +229,6 @@ impl<'r, 'c> Views<'r, 'c> {
         Ok(self.repo.people_by_ids(&ids)?.iter().map(|p| (p.id.clone(), person_ref(p))).collect())
     }
 
-    fn images(&self, item: &Item) -> AppResult<Images> {
-        let thumb = resolve_image(self.repo, item, "thumb")?
-            .map(|p| format!("/image/item/{}/thumb?v={}", item.id, version_of(&p)));
-        let art = SLOTS[3..].iter().map(|s| (s.to_string(), None)).collect();
-        Ok(Images { thumb, poster: None, backdrop: None, art })
-    }
-
     fn merged_fields(item: &Item) -> JsonMap {
         let mut m = item.extra.clone();
         for (k, v) in &item.fields {
@@ -339,7 +263,6 @@ impl<'r, 'c> Views<'r, 'c> {
             playable,
             child_count: if playable { None } else { Some(self.repo.child_count(&item.id)?) },
             aspect: item.kind.aspect(),
-            images: self.images(item)?,
             added_at: item.added_at,
             card,
         })
@@ -429,7 +352,6 @@ impl<'r, 'c> Views<'r, 'c> {
             id: r.id.clone(),
             rtype: r.rtype.clone(),
             name: r.name.clone(),
-            props: r.props.clone(),
             member_count: r.member_count,
             created_at: r.created_at,
             updated_at: r.updated_at,
@@ -462,7 +384,6 @@ impl<'r, 'c> Views<'r, 'c> {
             id: p.id.clone(),
             name: p.name.clone(),
             sort_name: p.sort_name.clone(),
-            image: person_image_url(p),
             credit_count: self.repo.credit_count(&p.id)?,
         })
     }

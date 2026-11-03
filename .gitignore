@@ -3,6 +3,7 @@ server/target/
 # Server runtime state
 server/data*/
 server/store*/
+server/assets*/
 server/ingest*/
 server/*.log
 server/*.pid

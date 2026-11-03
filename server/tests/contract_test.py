@@ -6,6 +6,7 @@ usage: contract_test.py http://127.0.0.1:8098
 Needs a FRESH server (empty DATA_DIR / MEDIA_DIR / INGEST_DIR) on this machine, ideally with
 short intervals so the periodic tasks run during the test:
   INGEST_SETTLE_SECS=1 INGEST_POLL_SECS=2 SIDECAR_INTERVAL=2 VERIFY_INTERVAL=3 BACKUP_INTERVAL=3
+  ASSET_GC_INTERVAL=2 ASSET_GC_GRACE_SECS=6 ASSET_DIR=<fresh dir> ASSET_DEFAULT_WIDTH=1280
 
 The test builds unique copies of testmedia/ (remuxed with -c copy, so every file has its own
 hash), copies them into the server's INGEST_DIR, uploads more through the API and checks the
@@ -86,8 +87,8 @@ PLAYABLE = {"movie", "episode", "track", "music_video", "video"}
 ASPECT = {"movie": "poster", "show": "poster", "season": "poster", "episode": "landscape", "music_video": "landscape",
           "video": "landscape", "artist": "square", "album": "square", "track": "square"}
 PLACEMENTS = {"card_badge", "card_meta", "header", "info", "section", "hidden"}
-WIDGETS = {"badge", "chip", "text", "rating", "link", "tags", "people", "markdown", "stat"}
-TYPES = {"text", "number", "date", "url", "tags", "rating", "bool", "duration", "person"}
+WIDGETS = {"badge", "chip", "text", "rating", "link", "tags", "people", "markdown", "stat", "image"}
+TYPES = {"text", "number", "date", "url", "tags", "rating", "bool", "duration", "person", "image"}
 STATES = {"waiting", "hashing", "placing", "probing", "done", "duplicate", "failed", "ignored"}
 
 
@@ -103,14 +104,12 @@ def check_block(b):
 
 def check_summary(s):
     has(s, "id", "kind", "library_id", "parent_id", "title", "subtitle", "year", "index", "parent_index", "index_end",
-        "duration", "playable", "child_count", "aspect", "images", "added_at", "card")
+        "duration", "playable", "child_count", "aspect", "added_at", "card")
+    assert "images" not in s, "slot images are gone"
     assert is_id(s["id"]) and is_id(s["library_id"]), (s["id"], s["library_id"])
     assert s["kind"] in ITEM_KINDS
     assert s["playable"] == (s["kind"] in PLAYABLE)
     assert s["aspect"] == ASPECT[s["kind"]], (s["kind"], s["aspect"])
-    has(s["images"], "thumb", "poster", "backdrop", "banner", "clearlogo", "landscape", "discart")
-    for v in s["images"].values():
-        assert v is None or v.startswith("/image/item/"), v
     if s["playable"]:
         assert s["child_count"] is None
     else:
@@ -145,7 +144,8 @@ def check_detail(d):
     assert hs == sorted(hs, reverse=True), hs
     for c in d["credits"]:
         has(c, "id", "role", "character", "order", "person")
-        has(c["person"], "id", "name", "image")
+        has(c["person"], "id", "name")
+        assert "image" not in c["person"]
     for c in d["children"]:
         check_summary(c)
     for b in d["display"]:
@@ -203,6 +203,26 @@ def make_video(path, w, h, freq):
     ffmpeg("-f", "lavfi", "-i", f"testsrc=size={w}x{h}:rate=25:duration=2", "-f", "lavfi",
            "-i", f"sine=frequency={freq}:duration=2", "-c:v", "libx264", "-preset", "veryfast",
            "-pix_fmt", "yuv420p", "-c:a", "aac", path)
+
+
+def make_image(work, ext, w, h):
+    """A unique test image (random colour + noise) made with ffmpeg."""
+    out = os.path.join(work, f"img-{uuid.uuid4().hex[:8]}.{ext}")
+    colour = uuid.uuid4().hex[:6]
+    ffmpeg("-f", "lavfi", "-i", f"color=c=0x{colour}:s={w}x{h},noise=alls=40:allf=t", "-frames:v", "1", out)
+    data = open(out, "rb").read()
+    os.unlink(out)
+    return data
+
+
+def probe_size(work, data, ext):
+    p = os.path.join(work, f"probe-{uuid.uuid4().hex[:6]}.{ext}")
+    open(p, "wb").write(data)
+    out = subprocess.run(["ffprobe", "-v", "error", "-select_streams", "v:0", "-show_entries", "stream=width,height",
+                          "-of", "csv=p=0", p], capture_output=True, check=True, text=True).stdout.strip()
+    os.unlink(p)
+    w, h = out.split(",")
+    return int(w), int(h)
 
 
 def build_fixtures(dst):
@@ -338,7 +358,7 @@ def main():
         assert sorted(f["path"] for f in bb["files"]) == ["Big Buck Test (2008) - 270p.mkv", "Big Buck Test (2008)-trailer.mp4", "Big Buck Test (2008).mp4"]
         assert [f["video"]["height"] for f in bb["files"]] == [360, 270, 240]
         assert bb["files"][1]["label"] == "270p · H264" and bb["files"][1]["path"] == "Big Buck Test (2008) - 270p.mkv"
-        assert bb["images"]["thumb"] and bb["images"]["poster"] is None
+        assert "images" not in bb
         keys = {b["key"]: b for b in bb["display"]}
         for k in ("year", "resolution", "duration", "video_codec", "size"):
             assert k in keys, (k, sorted(keys))
@@ -354,7 +374,6 @@ def main():
         show = get(f"/api/items/{find(r['items'], title='Test Show')['id']}")
         check_detail(show)
         assert [c["title"] for c in show["children"]] == ["Specials", "Season 1", "Season 2"]
-        assert show["images"]["thumb"], "container falls back to a child's thumb"
         s1 = get(f"/api/items/{show['children'][1]['id']}")
         check_detail(s1)
         assert s1["subtitle"] == "Test Show" and s1["index"] == 1
@@ -408,7 +427,7 @@ def main():
         r = items(library_id=state["videos"]["id"])
         titles = sorted(i["title"] for i in r["items"])
         assert titles == ["Bloopers", "Daily Show 2024.10.31", "Daily Show 2024.11.01", "Making Of", "beach day", "holiday clip", "mountain", "sample"], titles
-        assert all(i["kind"] == "video" and i["images"]["thumb"] for i in r["items"])
+        assert all(i["kind"] == "video" for i in r["items"])
         state["videos_list"] = r["items"]
     check("videos: everything else, titled from the cleaned file name", t_videos)
 
@@ -450,17 +469,14 @@ def main():
         assert req("GET", f"/subtitle/{f['id']}/0", raw=True)[0] == 404
     check("stream: Range 206, HEAD, no gzip, bytes from the store", t_stream)
 
-    def t_images():
+    def t_no_slots():
         mv = state["movie"]
-        st, h, body = req("GET", mv["images"]["thumb"], raw=True, expect=200)
-        assert h["Content-Type"] == "image/jpeg" and body[:3] == b"\xff\xd8\xff" and "max-age" in h.get("Cache-Control", "")
-        assert req("GET", f"/image/item/{mv['id']}/poster", raw=True)[0] == 404
-        assert req("GET", f"/image/item/{mv['id']}/bogus", raw=True)[0] == 400
-        tr = state["artist"]["children"][0]
-        assert tr["images"]["thumb"] is None and req("GET", f"/image/item/{tr['id']}/thumb", raw=True)[0] == 404
+        for path in (f"/image/item/{mv['id']}/thumb", f"/image/item/{mv['id']}/poster", "/image/person/abcdabcdabcdabcd"):
+            assert req("GET", path, raw=True)[0] == 404, path
+        assert req("PUT", "/api/people/abcdabcdabcdabcd/image", b"x")[0] in (404, 405)
         st, h, _ = req("GET", "/api/fields", headers={"Accept-Encoding": "gzip"}, raw=True, expect=200)
         assert h.get("Content-Encoding") == "gzip"
-    check("images: generated thumbs, cache headers, gzip JSON", t_images)
+    check("no image slots / person image endpoints; gzip JSON", t_no_slots)
 
     def t_frames():
         f = state["mv"]["files"][0]
@@ -562,17 +578,12 @@ def main():
     def t_people_credits():
         s, p = req("POST", "/api/people", {"name": "Contract Person", "bio": "Bio text", "birth_date": "1990-01-02"})
         assert s == 201, (s, p)
-        has(p, "id", "name", "sort_name", "image", "credit_count", "bio", "birth_date", "fields", "display", "credits")
-        assert p["sort_name"] == "Person, Contract" and p["credit_count"] == 0 and p["image"] is None
+        has(p, "id", "name", "sort_name", "credit_count", "bio", "birth_date", "fields", "display", "credits")
+        assert p["sort_name"] == "Person, Contract" and p["credit_count"] == 0 and "image" not in p
         assert req("POST", "/api/people", {"name": "contract  person"})[0] == 409
         pid = p["id"]
         p = req("PATCH", f"/api/people/{pid}", {"bio": "New bio", "sort_name": "CP"}, expect=200)[1]
         assert p["bio"] == "New bio" and p["sort_name"] == "CP"
-        png = bytes.fromhex("89504e470d0a1a0a0000000d49484452000000010000000108060000001f15c4890000000d49444154789c6360000002000154a24f5d0000000049454e44ae426082")
-        p = req("PUT", f"/api/people/{pid}/image", png, headers={"Content-Type": "image/png"}, expect=200)[1]
-        st, h, body = req("GET", p["image"], raw=True, expect=200)
-        assert body == png and h["Content-Type"] == "image/png"
-        assert req("PUT", f"/api/people/{pid}/image", b"not an image")[0] == 400
         mv = state["mv"]
         d = req("POST", f"/api/items/{mv['id']}/credits", {"person_id": pid, "role": "dancer", "character": "Lead"}, expect=200)[1]
         c = [c for c in d["credits"] if c["person"]["id"] == pid][0]
@@ -604,7 +615,7 @@ def main():
         assert req("GET", f"/api/people/{pid}")[0] == 404
         req("DELETE", f"/api/people/{nc['person']['id']}", expect=200)
         assert get(f"/api/items/{mv['id']}")["credits"] == []
-    check("people CRUD, image upload, credits, person fields", t_people_credits)
+    check("people CRUD, credits, person fields", t_people_credits)
 
     def t_search():
         r = get("/api/search?q=test")
@@ -758,16 +769,16 @@ def main():
         assert req("POST", "/api/relations", {"type": "collection"})[0] == 400
         assert req("POST", "/api/relations", {"members": [{"item_id": a["id"]}]})[0] == 400
         assert req("POST", "/api/relations", {"type": "bad-type!", "members": [{"item_id": a["id"]}]})[0] == 400
-        assert req("POST", "/api/relations", {"type": "x", "props": [1], "members": [{"item_id": a["id"]}]})[0] == 400
         assert req("POST", "/api/relations", {"type": "x", "members": [{"item_id": a["id"]}, {"item_id": a["id"]}]})[0] == 400
         assert req("POST", "/api/relations", {"type": "x", "members": [{"item_id": "0000000000000000"}]})[0] == 404
         assert get("/api/relations")["total"] == before, "failed creates must not leave relations behind"
         # create (type is normalized)
         rel = req("POST", "/api/relations", {
-            "type": "  Soundtrack Of ", "name": "My Pack", "props": {"color": "red"},
+            "type": "  Soundtrack Of ", "name": "My Pack", "props": {"color": "red"},  # props is ignored now
             "members": [{"item_id": a["id"], "role": "from"}, {"item_id": b["id"], "ord": 5, "role": " to "}]}, expect=201)[1]
-        has(rel, "id", "type", "name", "props", "member_count", "created_at", "updated_at", "members")
-        assert rel["type"] == "soundtrack_of" and rel["name"] == "My Pack" and rel["props"] == {"color": "red"}
+        has(rel, "id", "type", "name", "member_count", "created_at", "updated_at", "members")
+        assert rel["type"] == "soundtrack_of" and rel["name"] == "My Pack"
+        assert "props" not in rel
         assert rel["member_count"] == 2
         ms = rel["members"]
         assert [m["item_id"] for m in ms] == [a["id"], b["id"]], ms
@@ -794,13 +805,13 @@ def main():
         assert req("GET", "/api/items/0000000000000000/relations")[0] == 404
         # an item can be in several relations
         rel2 = req("POST", "/api/relations", {"type": "collection", "members": [{"item_id": a["id"]}]}, expect=201)[1]
-        assert rel2["name"] == "" and rel2["props"] == {}
+        assert rel2["name"] == ""
         assert {r["id"] for r in get(f"/api/items/{a['id']}/relations")} == {rid, rel2["id"]}
         # relations never show up as items
         assert not any(i["id"] in (rid, rel2["id"]) for i in items(top="false")["items"])
         # patch
-        p = req("PATCH", f"/api/relations/{rid}", {"name": "Renamed", "type": "Album", "props": {"n": 1}}, expect=200)[1]
-        assert p["name"] == "Renamed" and p["type"] == "album" and p["props"] == {"n": 1} and p["member_count"] == 2
+        p = req("PATCH", f"/api/relations/{rid}", {"name": "Renamed", "type": "Album"}, expect=200)[1]
+        assert p["name"] == "Renamed" and p["type"] == "album" and p["member_count"] == 2
         assert req("PATCH", f"/api/relations/{rid}", {"type": ""})[0] == 400
         assert req("PATCH", "/api/relations/0000000000000000", {"name": "x"})[0] == 404
         # member upsert
@@ -845,8 +856,142 @@ def main():
         assert get("/api/relations")["total"] == before
     check("relations: CRUD, members, types, item views, auto-delete, validation", t_relations)
 
+    # ---------------------------------------------------------------- image assets
+    def t_assets():
+        pool = [i for i in items(library_id=state["movies"]["id"])["items"]]
+        item = pool[0]
+        pid = req("POST", "/api/people", {"name": "Asset Person"}, expect=201)[1]["id"]
+        jpg = make_image(work, "jpg", 800, 600)
+        png = make_image(work, "png", 400, 200)
+        # upload + dedupe
+        s, a = req("POST", "/api/assets", jpg, headers={"Content-Type": "image/jpeg"})
+        assert s == 201, (s, a)
+        has(a, "hash", "mime", "width", "height", "size")
+        assert len(a["hash"]) == 64 and a["mime"] == "image/jpeg" and (a["width"], a["height"]) == (800, 600) and a["size"] == len(jpg)
+        s, a2 = req("POST", "/api/assets", jpg)
+        assert s == 200 and a2 == a, "same bytes -> existing asset"
+        assert req("POST", "/api/assets", b"definitely not an image")[0] == 400
+        assert req("POST", "/api/assets", b"")[0] == 400
+        pa = req("POST", "/api/assets", png, expect=201)[1]
+        assert pa["mime"] == "image/png" and (pa["width"], pa["height"]) == (400, 200)
+        # stored content-addressed in ASSET_DIR (separate from the media store), original untouched
+        adir = status()["asset_dir"]
+        rel = os.path.join(adir, a["hash"][:2], a["hash"][2:4], a["hash"] + ".jpg")
+        assert os.path.isfile(rel) and open(rel, "rb").read() == jpg and not adir.startswith(state["media_dir"])
+        # original: no params, ?original=1, unknown params
+        for q in ("", "?original=1", "?v=abc", "?original=1&w=100&fmt=png"):
+            st, h, body = req("GET", f"/asset/{a['hash']}{q}", raw=True, expect=200)
+            assert body == jpg and h["Content-Type"] == "image/jpeg", q
+            assert "immutable" in h["Cache-Control"] and h["ETag"] == '"%s"' % a["hash"], h
+        st, h, _ = req("GET", f"/asset/{a['hash']}", headers={"If-None-Match": '"%s"' % a["hash"]}, raw=True)
+        assert st == 304
+        assert req("GET", "/asset/" + "0" * 64, raw=True)[0] == 404
+        assert req("GET", "/asset/nothex", raw=True)[0] == 404
+        # transforms: w, h, fmt, fit; cache miss then hit
+        st, h, body = req("GET", f"/asset/{a['hash']}?w=400&fmt=webp", raw=True, expect=200)
+        assert h["Content-Type"] == "image/webp" and body[:4] == b"RIFF" and body[8:12] == b"WEBP", body[:12]
+        assert (h["X-Asset-Width"], h["X-Asset-Height"]) == ("400", "300") and h["X-Asset-Cache"] == "miss"
+        assert probe_size(work, body, "webp") == (400, 300)
+        st, h2, body2 = req("GET", f"/asset/{a['hash']}?fmt=webp&w=400", raw=True, expect=200)
+        assert h2["X-Asset-Cache"] == "hit" and body2 == body and h2["ETag"] == h["ETag"]
+        assert req("GET", f"/asset/{a['hash']}?w=400", raw=True, expect=200)[2] == body, "webp is the default format"
+        assert req("GET", f"/asset/{a['hash']}?w=400&fmt=webp", headers={"If-None-Match": h["ETag"]}, raw=True)[0] == 304
+        st, h, body = req("GET", f"/asset/{a['hash']}?h=150&fmt=jpg&q=70", raw=True, expect=200)
+        assert h["Content-Type"] == "image/jpeg" and body[:3] == b"\xff\xd8\xff" and probe_size(work, body, "jpg") == (200, 150)
+        st, h, body = req("GET", f"/asset/{a['hash']}?w=200&h=200&fmt=png", raw=True, expect=200)
+        assert h["Content-Type"] == "image/png" and body[:4] == b"\x89PNG" and probe_size(work, body, "png") == (200, 200), "cover crops to the box"
+        st, h, body = req("GET", f"/asset/{a['hash']}?w=200&h=200&fit=contain&fmt=png", raw=True, expect=200)
+        assert probe_size(work, body, "png") == (200, 150), "contain fits inside the box"
+        # no upscaling; no size restriction otherwise
+        st, h, body = req("GET", f"/asset/{a['hash']}?w=5000&fmt=png", raw=True, expect=200)
+        assert (h["X-Asset-Width"], h["X-Asset-Height"]) == ("800", "600") and probe_size(work, body, "png") == (800, 600)
+        st, h3, body3 = req("GET", f"/asset/{a['hash']}?w=9999&fmt=png", raw=True, expect=200)
+        assert h3["X-Asset-Cache"] == "hit" and body3 == body, "clamped sizes share a cache entry"
+        st, h, body = req("GET", f"/asset/{a['hash']}?w=123&h=77", raw=True, expect=200)
+        assert (h["X-Asset-Width"], h["X-Asset-Height"]) == ("123", "77"), "arbitrary sizes are served"
+        # default width: transform params without w/h (ASSET_DEFAULT_WIDTH=1280 > 800 original -> original size)
+        st, h, body = req("GET", f"/asset/{a['hash']}?fmt=jpg", raw=True, expect=200)
+        assert (h["X-Asset-Width"], h["X-Asset-Height"]) == ("800", "600")
+        for q in ("w=0", "fit=zoom", "fmt=bmp", "q=0", "q=101", "w=abc"):
+            assert req("GET", f"/asset/{a['hash']}?{q}", raw=True)[0] == 400, q
+
+        # image field defs: nothing seeded, created like any custom field
+        assert not any(f["type"] == "image" for f in get("/api/fields")), "no image fields are seeded"
+        d = req("POST", "/api/fields", {"key": "ct_poster", "label": "Poster", "type": "image", "applies_to": []}, expect=201)[1]
+        assert d["type"] == "image" and d["builtin"] is False
+        req("POST", "/api/fields", {"key": "ct_photos", "label": "Photos", "type": "image", "applies_to": ["person"]}, expect=201)
+        # set on an item: single ref
+        det = req("PUT", f"/api/items/{item['id']}/fields/ct_poster", {"value": {"hash": a["hash"]}}, expect=200)[1]
+        assert det["fields"]["ct_poster"] == {"hash": a["hash"]}
+        assert not any(b["key"] == "ct_poster" for b in det["display"]), "hidden by default"
+        # ordered list, on a person too (uppercase hashes are normalized, extra keys dropped)
+        pv = [{"hash": pa["hash"].upper(), "x": 1}, {"hash": a["hash"]}]
+        p = req("PUT", f"/api/people/{pid}/fields/ct_photos", {"value": pv}, expect=200)[1]
+        assert p["fields"]["ct_photos"] == [{"hash": pa["hash"]}, {"hash": a["hash"]}], p["fields"]
+        assert "image" not in p
+        # invalid values
+        for bad in ({"hash": "0" * 64}, [{"hash": "0" * 64}], {"hash": "zz"}, "deadbeef", a["hash"], [], 5, {"x": 1}, [a["hash"]]):
+            assert req("PUT", f"/api/items/{item['id']}/fields/ct_poster", {"value": bad})[0] == 400, bad
+            assert req("PUT", f"/api/people/{pid}/fields/ct_photos", {"value": bad})[0] == 400, bad
+        assert get(f"/api/items/{item['id']}")["fields"]["ct_poster"] == {"hash": a["hash"]}, "failed set keeps the value"
+        # clear with null
+        det = req("PUT", f"/api/items/{item['id']}/fields/ct_poster", {"value": None}, expect=200)[1]
+        assert "ct_poster" not in det["fields"]
+        req("PUT", f"/api/items/{item['id']}/fields/ct_poster", {"value": {"hash": a["hash"]}}, expect=200)
+        state.update(asset=a, asset_png=pa, asset_item=item["id"], asset_person=pid)
+    check("assets: upload+dedupe, original, transforms, cache, no upscale, image fields, validation", t_assets)
+
+    def t_asset_gc():
+        a, pa = state["asset"], state["asset_png"]
+        orphan_bytes = make_image(work, "jpg", 64, 64)
+        orphan = req("POST", "/api/assets", orphan_bytes, expect=201)[1]
+        req("GET", f"/asset/{orphan['hash']}?w=32", raw=True, expect=200)  # also creates a cache entry
+        # inside the grace period nothing unreferenced is collected
+        time.sleep(1.5)
+        assert req("GET", f"/asset/{orphan['hash']}", raw=True)[0] == 200, "freshly uploaded assets survive"
+        # after the grace period the orphan goes, attached assets stay
+        wait_for(lambda: req("GET", f"/asset/{orphan['hash']}", raw=True)[0] == 404, timeout=40, what="orphan asset collected")
+        assert status()["last_asset_gc"], "gc task ran"
+        assert req("GET", f"/asset/{a['hash']}", raw=True)[0] == 200, "referenced asset kept"
+        assert req("GET", f"/asset/{pa['hash']}", raw=True)[0] == 200, "referenced by a person kept"
+        adir = status()["asset_dir"]
+        assert not os.path.exists(os.path.join(adir, orphan["hash"][:2], orphan["hash"][2:4], orphan["hash"] + ".jpg"))
+        # re-uploading the same bytes brings it back (the file was really removed)
+        again = req("POST", "/api/assets", orphan_bytes, expect=201)[1]
+        assert again["hash"] == orphan["hash"]
+        # clearing the last reference lets the asset go after the grace period
+        req("DELETE", f"/api/people/{state['asset_person']}/fields/ct_photos", expect=200)
+        req("PUT", f"/api/items/{state['asset_item']}/fields/ct_poster", {"value": None}, expect=200)
+        wait_for(lambda: req("GET", f"/asset/{pa['hash']}", raw=True)[0] == 404, timeout=40, what="released asset collected")
+        # deleting the field definition drops the values too
+        req("DELETE", "/api/fields/ct_photos", expect=200)
+        req("DELETE", "/api/fields/ct_poster", expect=200)
+        req("DELETE", f"/api/people/{state['asset_person']}", expect=200)
+    check("assets: GC respects the grace period, keeps referenced assets, collects released ones", t_asset_gc)
+
+    def t_asset_verify():
+        b_bytes = make_image(work, "jpg", 32, 32)
+        b = req("POST", "/api/assets", b_bytes, expect=201)[1]
+        adir = status()["asset_dir"]
+        path = os.path.join(adir, b["hash"][:2], b["hash"][2:4], b["hash"] + ".jpg")
+        fid = "asset:" + b["hash"]
+        # keep it referenced so GC leaves it alone while verify reports the damage
+        req("POST", "/api/fields", {"key": "ct_vimg", "label": "V", "type": "image"}, expect=201)
+        item = items(top="false", limit=1)["items"][0]
+        req("PUT", f"/api/items/{item['id']}/fields/ct_vimg", {"value": {"hash": b["hash"]}}, expect=200)
+        os.chmod(path, 0o644)
+        os.unlink(path)
+        probs = wait_for(lambda: [p for p in status()["problems"] if p["file_id"] == fid], what="missing asset reported")
+        assert probs[0]["problem"] == "missing" and probs[0]["hash"] == b["hash"], probs
+        # re-upload restores the file and the problem clears
+        req("POST", "/api/assets", b_bytes, expect=200)
+        wait_for(lambda: not [p for p in status()["problems"] if p["file_id"] == fid], what="asset problem cleared")
+        req("DELETE", "/api/fields/ct_vimg", expect=200)
+    check("assets: integrity verify reports missing files, re-upload heals", t_asset_verify)
+
     def t_tasks():
         s = status()
+        has(s, "last_asset_gc", "asset_dir")
         if not (s["last_sidecar_sync"] or s["last_verify"] or s["last_backup"]):
             wait_for(lambda: status()["last_backup"], timeout=20, what="periodic tasks (run the server with short intervals)")
         # sidecars: written for stored files, refreshed when the item changes

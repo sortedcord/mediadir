@@ -11,6 +11,7 @@ WorkingDirectory=/home/sortedcord/mediadir/server
 ExecStart=/home/sortedcord/mediadir/server/target/release/mediadir-server
 Environment=DATA_DIR=/home/sortedcord/mediadir/server/data2
 Environment=BIND=0.0.0.0:8096
+Environment=ASSET_DIR=/home/sortedcord/mediadir/server/assets-v3
 EnvironmentFile=-/home/sortedcord/mediadir/server/service.env
 Restart=on-failure
 RestartSec=5

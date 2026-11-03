@@ -1,5 +1,6 @@
 //! SQLite persistence: connection pool, schema and the typed [`Repo`] layer.
 
+mod assets;
 mod fields;
 mod files;
 mod ingest;
@@ -8,6 +9,7 @@ mod people;
 mod relations;
 mod schema;
 
+pub use assets::Asset;
 pub use ingest::{IngestRecord, SeenKey};
 pub use items::{ItemQuery, Removed};
 pub use people::{default_sort_name, CreditDraft, PeopleQuery};
@@ -39,6 +41,7 @@ impl Db {
         let mut conn = pool.get()?;
         schema::migrate(&mut conn).map_err(AppError::Internal)?;
         schema::ensure_relations(&conn).map_err(AppError::Internal)?;
+        schema::ensure_assets(&conn).map_err(AppError::Internal)?;
         Ok(Db { pool })
     }
 

@@ -10,7 +10,6 @@ use axum::{
     Json, Router,
 };
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
 use std::collections::HashSet;
 
 pub fn routes() -> Router<Shared> {
@@ -101,28 +100,18 @@ fn to_members(list: Vec<MemberBody>) -> AppResult<Vec<Member>> {
     Ok(out)
 }
 
-fn props_of(v: Option<Value>) -> AppResult<Option<crate::model::JsonMap>> {
-    match v {
-        None => Ok(None),
-        Some(Value::Object(m)) => Ok(Some(m)),
-        Some(Value::Null) => Ok(Some(Default::default())),
-        Some(_) => Err(AppError::bad("props must be an object")),
-    }
-}
-
 #[derive(Deserialize)]
 struct CreateBody {
     #[serde(rename = "type")]
     rtype: Option<String>,
+    #[serde(alias = "label")]
     name: Option<String>,
-    props: Option<Value>,
     members: Option<Vec<MemberBody>>,
 }
 
 async fn create(State(st): State<Shared>, JsonBody(b): JsonBody<CreateBody>) -> AppResult<(StatusCode, Json<RelationDetail>)> {
     let rtype = normalize_type(&b.rtype.unwrap_or_default())?;
     let name = b.name.unwrap_or_default().trim().to_string();
-    let props = props_of(b.props)?.unwrap_or_default();
     let members = to_members(b.members.unwrap_or_default())?;
     if members.is_empty() {
         return Err(AppError::bad("a relation needs at least one member"));
@@ -132,7 +121,7 @@ async fn create(State(st): State<Shared>, JsonBody(b): JsonBody<CreateBody>) -> 
         .call(move |r| {
             r.tx(|r| {
                 let id = new_relation_id();
-                r.insert_relation(&id, &rtype, &name, &props)?;
+                r.insert_relation(&id, &rtype, &name)?;
                 r.set_relation_members(&id, &members)?;
                 detail_of(r, &id)
             })
@@ -143,15 +132,14 @@ async fn create(State(st): State<Shared>, JsonBody(b): JsonBody<CreateBody>) -> 
 
 #[derive(Deserialize)]
 struct PatchBody {
+    #[serde(alias = "label")]
     name: Option<String>,
     #[serde(rename = "type")]
     rtype: Option<String>,
-    props: Option<Value>,
 }
 
 async fn patch_relation(State(st): State<Shared>, Path(id): Path<String>, JsonBody(b): JsonBody<PatchBody>) -> AppResult<Json<RelationDetail>> {
     let rtype = b.rtype.as_deref().map(normalize_type).transpose()?;
-    let props = props_of(b.props)?;
     Ok(Json(
         st.db
             .call(move |r| {
@@ -161,9 +149,6 @@ async fn patch_relation(State(st): State<Shared>, Path(id): Path<String>, JsonBo
                 }
                 if let Some(n) = b.name {
                     rel.name = n.trim().to_string();
-                }
-                if let Some(p) = props {
-                    rel.props = p;
                 }
                 r.update_relation(&rel)?;
                 detail_of(r, &id)

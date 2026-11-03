@@ -80,9 +80,15 @@ fn default_display(t: FieldType) -> DisplaySpec {
         FieldType::Rating => Widget::Rating,
         FieldType::Url => Widget::Link,
         FieldType::Person => Widget::People,
+        FieldType::Image => Widget::Image,
         _ => Widget::Text,
     };
-    let placement = if t == FieldType::Person { Placement::Section } else { Placement::Info };
+    let placement = match t {
+        FieldType::Person => Placement::Section,
+        // images are consumed by clients explicitly, not rendered as generic blocks
+        FieldType::Image => Placement::Hidden,
+        _ => Placement::Info,
+    };
     DisplaySpec { placement, widget, order: 300, format: None, color: None, icon: None }
 }
 

@@ -188,7 +188,7 @@ struct FieldValue {
 }
 
 /// Loose validation of a value against a field type.
-pub fn validate_value(t: FieldType, v: &Value) -> AppResult<Value> {
+pub fn validate_value(r: &Repo, t: FieldType, v: &Value) -> AppResult<Value> {
     let bad = |what: &str| AppError::bad(format!("value must be {what}"));
     Ok(match t {
         FieldType::Number | FieldType::Rating | FieldType::Duration => match v {
@@ -211,6 +211,15 @@ pub fn validate_value(t: FieldType, v: &Value) -> AppResult<Value> {
             Value::Array(a) if a.iter().all(|x| x.is_string()) => v.clone(),
             _ => return Err(bad("a person id or an array of person ids")),
         },
+        FieldType::Image => {
+            let hashes = crate::model::image_refs(v).map_err(AppError::bad)?;
+            for h in &hashes {
+                if !r.asset_exists(h)? {
+                    return Err(AppError::bad(format!("unknown asset '{h}' (upload it with POST /api/assets first)")));
+                }
+            }
+            crate::model::image_value(v, &hashes)
+        }
         FieldType::Text | FieldType::Date | FieldType::Url => match v {
             Value::String(_) => v.clone(),
             Value::Number(n) => Value::String(n.to_string()),
@@ -232,17 +241,20 @@ async fn set_field(
                 if def.derived {
                     return Err(AppError::bad(format!("'{key}' is derived and cannot be set")));
                 }
-                let mut item = r.get_item(&id)?;
-                if CORE_FIELDS.contains(&key.as_str()) {
-                    apply_core(&mut item, &key, &b.value)?;
-                } else if b.value.is_null() {
-                    item.fields.remove(&key);
-                } else {
-                    let v = validate_value(def.field_type, &b.value)?;
-                    item.fields.insert(key.clone(), v);
-                }
-                r.save_item(&item)?;
-                detail_of(r, &id)
+                // asset existence check + save are one transaction (the asset GC takes the write lock too)
+                r.tx(|r| {
+                    let mut item = r.get_item(&id)?;
+                    if CORE_FIELDS.contains(&key.as_str()) {
+                        apply_core(&mut item, &key, &b.value)?;
+                    } else if b.value.is_null() {
+                        item.fields.remove(&key);
+                    } else {
+                        let v = validate_value(r, def.field_type, &b.value)?;
+                        item.fields.insert(key.clone(), v);
+                    }
+                    r.save_item(&item)?;
+                    detail_of(r, &id)
+                })
             })
             .await?,
     ))

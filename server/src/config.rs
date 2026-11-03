@@ -10,6 +10,13 @@ pub struct Config {
     pub ingest_dir: PathBuf,
     /// MediaDir's private content-addressed store.
     pub media_dir: PathBuf,
+    /// Content-addressed image assets (`image` field values). Separate from MEDIA_DIR.
+    pub asset_dir: PathBuf,
+    /// Output width for transform requests that give neither `w` nor `h`.
+    pub asset_default_width: u32,
+    /// Seconds between unreferenced-asset GC runs, and the minimum age before an asset is collected.
+    pub asset_gc_interval: Option<Duration>,
+    pub asset_gc_grace: Duration,
     /// Database, thumbnails, frame cache, backups.
     pub data_dir: PathBuf,
     /// Poll interval in addition to inotify (`None` = inotify only).
@@ -42,6 +49,10 @@ impl Config {
             bind: env("BIND").unwrap_or_else(|| "0.0.0.0:8096".into()),
             ingest_dir: absolute(PathBuf::from(env("INGEST_DIR").unwrap_or_else(|| "./ingest".into()))),
             media_dir: absolute(PathBuf::from(env("MEDIA_DIR").unwrap_or_else(|| "./store".into()))),
+            asset_dir: absolute(PathBuf::from(env("ASSET_DIR").unwrap_or_else(|| "./assets".into()))),
+            asset_default_width: secs("ASSET_DEFAULT_WIDTH", 1280).clamp(1, 20000) as u32,
+            asset_gc_interval: every("ASSET_GC_INTERVAL", 3600),
+            asset_gc_grace: Duration::from_secs(secs("ASSET_GC_GRACE_SECS", 86400)),
             data_dir: absolute(PathBuf::from(env("DATA_DIR").unwrap_or_else(|| "./data".into()))),
             poll: every("INGEST_POLL_SECS", 60),
             settle: Duration::from_secs(secs("INGEST_SETTLE_SECS", 10)),
@@ -58,6 +69,12 @@ impl Config {
         if i.starts_with(m) || m.starts_with(i) {
             return Err(format!("INGEST_DIR ({}) and MEDIA_DIR ({}) must not contain each other", i.display(), m.display()));
         }
+        let a = &self.asset_dir;
+        for (name, d) in [("INGEST_DIR", i), ("MEDIA_DIR", m)] {
+            if a.starts_with(d) || d.starts_with(a) {
+                return Err(format!("ASSET_DIR ({}) and {name} ({}) must not contain each other", a.display(), d.display()));
+            }
+        }
         Ok(())
     }
 }
@@ -72,6 +89,9 @@ mod tests {
         c.media_dir = "/a/ingest/store".into();
         assert!(c.validate().is_err());
         c.media_dir = "/a/store".into();
+        c.asset_dir = "/a/assets".into();
         assert!(c.validate().is_ok());
+        c.asset_dir = "/a/store/assets".into();
+        assert!(c.validate().is_err());
     }
 }

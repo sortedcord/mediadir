@@ -3,6 +3,7 @@
 //! their file name, and served as original bytes (HTTP Range). No transcoding, ever.
 
 mod api;
+mod assets;
 mod config;
 mod db;
 mod display;
@@ -33,9 +34,10 @@ async fn main() {
         }
     };
     let ingest = ingest::Ingest::new(db.clone(), &cfg).expect("open ingest dir and store");
-    let tasks = tasks::Maintenance::new(db.clone(), ingest.store.clone(), &cfg);
+    let assets = Arc::new(assets::AssetService::new(&cfg.asset_dir, &cfg.data_dir, cfg.asset_default_width).expect("open ASSET_DIR"));
+    let tasks = tasks::Maintenance::new(db.clone(), ingest.store.clone(), assets.clone(), &cfg);
     let frames = Arc::new(frames::FrameService::new(&cfg.data_dir));
-    let state = Arc::new(AppState { db, data_dir: cfg.data_dir.clone(), frames, ingest: ingest.clone(), tasks: tasks.clone() });
+    let state = Arc::new(AppState { db, data_dir: cfg.data_dir.clone(), frames, assets, ingest: ingest.clone(), tasks: tasks.clone() });
 
     ingest.start();
     tasks.spawn();
@@ -43,10 +45,11 @@ async fn main() {
     let app = api::router(state);
     let listener = tokio::net::TcpListener::bind(&cfg.bind).await.expect("bind");
     println!(
-        "mediadir-server v3 listening on http://{} (ingest: {}, store: {}, data: {})",
+        "mediadir-server v3 listening on http://{} (ingest: {}, store: {}, assets: {}, data: {})",
         cfg.bind,
         cfg.ingest_dir.display(),
         cfg.media_dir.display(),
+        cfg.asset_dir.display(),
         cfg.data_dir.display()
     );
     axum::serve(listener, app).await.expect("server");

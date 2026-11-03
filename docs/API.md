@@ -6,7 +6,7 @@ How media gets in (ingest dir, uploads, the content-addressed store, file-name m
 virtual libraries, deletes, durability) is specified in **[STORAGE.md](STORAGE.md)** (v3).
 The response shapes below are unchanged from v2 except where marked *v3*.
 All ids are opaque strings (16 hex chars, stable hashes). All image/stream URLs in responses are
-**server-relative paths** (e.g. `/image/item/ab12/thumb`); clients prefix the server base URL.
+**server-relative paths** (e.g. `/stream/ab12…`, `/asset/<hash>`); clients prefix the server base URL.
 Unknown JSON fields must be ignored by clients; optional fields may be absent or `null`.
 
 ## Concepts
@@ -49,7 +49,6 @@ Unknown JSON fields must be ignored by clients; optional fields may be absent or
   "index": null, "parent_index": null,
   "duration": 178.4, "playable": true, "child_count": null,
   "aspect": "landscape",
-  "images": { "thumb": "/image/item/…/thumb", "poster": null, "backdrop": null },
   "added_at": 1793433022,
   "card": [ DisplayBlock, … ]
 }
@@ -70,7 +69,7 @@ Unknown JSON fields must be ignored by clients; optional fields may be absent or
 }
 ```
 `children` sorted naturally (seasons/episodes/tracks by index, albums by year).
-`fields` = raw values of all custom + editable builtin fields set on the item.
+`fields` = raw values of all custom + editable builtin fields set on the item (image fields hold `{"hash"}` refs, see [Images](#images-v3)).
 `display` = all non-hidden blocks for the detail page (placements `header`, `info`, `section`, plus card placements).
 `locked` = core field names manually edited.
 
@@ -94,13 +93,13 @@ the embedded streams only (`external` is always null; there is no `/subtitle` en
 ### Person / Credit
 ```json
 // Person (summary)
-{ "id": "…", "name": "Nora Fatehi", "sort_name": "Fatehi, Nora", "image": "/image/person/…" | null, "credit_count": 4 }
+{ "id": "…", "name": "Nora Fatehi", "sort_name": "Fatehi, Nora", "credit_count": 4 }
 // PersonDetail = Person + 
 { "bio": "…", "birth_date": "1992-02-06", "fields": {…}, "display": [DisplayBlock],
   "credits": [ { "id": "<credit id>", "role": "actor", "character": null, "item": ItemSummary } ] }
 // Credit (on ItemDetail)
 { "id": "…", "role": "actor", "character": "Herself", "order": 0,
-  "person": { "id": "…", "name": "…", "image": null } }
+  "person": { "id": "…", "name": "…" } }
 ```
 `role` (open set, lowercase): `actor`, `director`, `writer`, `producer`, `artist`, `album_artist`, `featured`, `singer`, `composer`, `lyricist`, `dancer`, `guest`, `creator`.
 
@@ -113,14 +112,15 @@ the embedded streams only (`external` is always null; there is no `/subtitle` en
                "format": "{value}fps", "color": "#FF4D6D", "icon": null }
 }
 ```
-- `type`: `text | number | date | url | tags | rating | bool | duration | person`
-  (`person` values are person ids, or arrays of person ids — rendered as tappable people).
+- `type`: `text | number | date | url | tags | rating | bool | duration | person | image`
+  (`person` values are person ids, or arrays of person ids — rendered as tappable people;
+  `image` values are asset refs, see [Images](#images-v3)).
 - `derived`: computed by the server (from probing/structure); values not editable, display still configurable.
 - `applies_to`: item kinds; `[]` = all kinds.
 - `display.placement`: `card_badge | card_meta | header | info | section | hidden`
   - `card_badge` small pill over the card image · `card_meta` small text line under card title
   - `header` chips next to the title on detail · `info` key/value table row · `section` full-width block with heading (long text, tag clouds, people rows)
-- `display.widget`: `badge | chip | text | rating | link | tags | people | markdown | stat`
+- `display.widget`: `badge | chip | text | rating | link | tags | people | markdown | stat | image`
 - `display.format`: template, `{value}` substituted (for numbers/text). Optional.
 - `display.color`: `#RRGGBB` or null (client default). `icon`: Material icon name hint (e.g. `star`, `hd`, `language`), client may ignore unknown.
 
@@ -138,10 +138,10 @@ Custom fields are created by users with any key not in this list.
   "order": 20, "color": "#FF4D6D", "icon": null,
   "text": "30fps",                    // formatted, ready to show
   "value": 29.97,                     // raw
-  "people": [ { "id": "…", "name": "…", "image": null } ]   // only for widget=people / type=person
+  "people": [ { "id": "…", "name": "…" } ]   // only for widget=people / type=person
 }
 ```
-Blocks with empty/null values are omitted. Clients render purely from these; they must not hardcode which fields exist.
+Blocks with empty/null values are omitted. A block of an `image` field has `text: ""` and the raw ref(s) in `value`; new image fields default to placement `hidden`, so they only appear in `fields`. Clients render purely from these; they must not hardcode which fields exist.
 
 ## Endpoints
 All JSON. Errors: non-2xx with `{ "error": "message" }`.
@@ -166,7 +166,6 @@ All JSON. Errors: non-2xx with `{ "error": "message" }`.
 | GET | `/api/people/{id}` | PersonDetail |
 | PATCH | `/api/people/{id}` | `{name?, sort_name?, bio?, birth_date?}` |
 | PUT | `/api/people/{id}/fields/{key}` / DELETE | like items |
-| PUT | `/api/people/{id}/image` | raw image body (jpeg/png) |
 | DELETE | `/api/people/{id}` | removes person + credits |
 | GET | `/api/fields` | `[FieldDefinition]` (builtin + custom, sorted by order) |
 | POST | `/api/fields` | custom def `{key, label, type, applies_to, display}` |
@@ -174,34 +173,72 @@ All JSON. Errors: non-2xx with `{ "error": "message" }`.
 | DELETE | `/api/fields/{key}` | custom only (also deletes values) |
 | GET | `/api/search` | `q` → `{ "items": [ItemSummary], "people": [Person] }` |
 | GET/HEAD | `/stream/{file_id}` | original bytes, Range/206 |
-| GET | `/image/item/{id}/{thumb\|poster\|backdrop}` | 404 if none; long cache headers |
+| POST | `/api/assets` | *v3:* upload an image, raw body → `{hash, mime, width, height, size}` (see [Images](#images-v3)) |
+| GET | `/asset/{hash}` | *v3:* original or transformed image, `w,h,fit,fmt,q,original` |
 | GET | `/api/ingest` · `/api/ingest/{id}` | *v3:* ingest records ([STORAGE.md](STORAGE.md)) |
 | GET | `/api/ingest/status` | *v3:* watcher/queue/task status |
 | POST | `/api/ingest/scan` | *v3:* force a poll of the ingest dir, 202 |
 | POST | `/api/ingest/upload` | *v3:* raw body + `X-Filename` |
-| GET | `/image/person/{id}` | 404 if none |
 | GET | `/api/relations` | *v3:* `type, q, limit=50, offset=0` → `{total, relations:[RelationSummary]}` |
 | GET | `/api/relation-types` | `[{type, count}]` for types in use |
-| POST | `/api/relations` | `{type, name?, props?, members:[{item_id, ord?, role?}]}` → `201` RelationDetail. `type` is normalized (trim, lowercase, spaces → `_`, `[a-z0-9_]`, else `400`); at least one member, unique, existing items (`404` for unknown items) |
+| POST | `/api/relations` | `{type, name?, members:[{item_id, ord?, role?}]}` → `201` RelationDetail. `type` is normalized (trim, lowercase, spaces → `_`, `[a-z0-9_]`, else `400`); at least one member, unique, existing items (`404` for unknown items) |
 | GET | `/api/relations/{id}` | RelationDetail |
-| PATCH | `/api/relations/{id}` | `{name?, type?, props?}` → RelationDetail |
+| PATCH | `/api/relations/{id}` | `{name?, type?}` → RelationDetail |
 | DELETE | `/api/relations/{id}` | `204`; member items are untouched |
 | PUT | `/api/relations/{id}/members` | `{members:[…]}` replaces the member list → RelationDetail; an empty list deletes the relation (`204`) |
 | POST | `/api/relations/{id}/members` | `{item_id, ord?, role?}` add or update one member → RelationDetail. A missing `ord`/`role` keeps the current value (new members append); `role: ""` clears it |
 | DELETE | `/api/relations/{id}/members/{item_id}` | → RelationDetail, or `204` when that was the last member and the relation was removed |
 | GET | `/api/items/{id}/relations` | `[RelationSummary + ord, role]` for every relation the item is in |
 
+## Images (v3)
+There are no image slots. The server has no notion of poster/thumb/backdrop and never picks or falls back
+between images; **clients decide** which image field is shown where. Images are values of fields of type `image`.
+Full details (storage, cache, GC): [STORAGE.md](STORAGE.md#image-assets).
+
+1. **Upload**: `POST /api/assets` with the raw bytes as body (JPEG/PNG/WebP/GIF, max 100 MB).
+   ```json
+   // 201 (new) or 200 (identical bytes already stored)
+   { "hash": "<64-char lowercase hex BLAKE3>", "mime": "image/jpeg", "width": 2000, "height": 3000, "size": 812345 }
+   ```
+   Errors: `400` not an image, `413` too large.
+2. **Define a field** (once, like any custom field; nothing is seeded): `POST /api/fields`
+   `{"key":"poster","label":"Poster","type":"image","applies_to":["movie","show"]}` (`applies_to: ["person"]` for people,
+   `[]` for all). Default display is `placement: hidden, widget: image`.
+3. **Set the value**: `PUT /api/items/{id}/fields/{key}` or `PUT /api/people/{id}/fields/{key}` with
+   `{"value": {"hash": "<hex>"}}` (one image) or `{"value": [{"hash": "<hex>"}, {"hash": "<hex>"}]}` (ordered list,
+   e.g. a gallery or several candidates). Every hash must be an uploaded asset, else `400`. `{"value": null}` or
+   `DELETE …/fields/{key}` clears it. The value comes back unchanged (hashes lower-cased) in `fields.<key>` of
+   `ItemDetail` / `PersonDetail`.
+4. **Display**: `GET /asset/{hash}` plus optional params; the client builds the URL from the hash.
+
+| `GET /asset/{hash}` query | meaning |
+|---|---|
+| *(none)*, `original=1` | original bytes, original mime. Unknown params (e.g. `v=`) are ignored. |
+| `w`, `h` | target size in pixels; aspect kept when only one is given. Not restricted, but clamped to the original (never upscaled). |
+| `fit` | `cover` (default; fill `w`×`h`, center-crop) or `contain` (fit inside `w`×`h`). Only matters when both `w` and `h` are given. |
+| `fmt` | `webp` (default), `jpg`, `png` |
+| `q` | 1–100, default 80 (ignored for png) |
+| any of `w h fit fmt q` without `w`/`h` | width = server `ASSET_DEFAULT_WIDTH` (default 1280), clamped to the original |
+
+Responses: `Cache-Control: public, max-age=31536000, immutable`, `ETag`, `304` on `If-None-Match`; variants also
+`X-Asset-Width` / `X-Asset-Height` (actual output size) and `X-Asset-Cache: hit|miss`. HTTP Range is not supported
+for assets. Assets nothing references are deleted by the server about 24 h after their last upload, so attach
+uploaded images promptly (re-uploading identical bytes is always safe and returns the existing asset).
+
+Removed in this version: `ItemSummary.images`, `GET /image/item/{id}/{slot}`, `Person.image`, `GET /image/person/{id}`,
+`PUT /api/people/{id}/image`, `Relation.props`, and the thumbnail generated at ingest.
+
 ## Relations (v3)
 A relation is a named group of items of a free-form `type` (`collection`, `album`, `soundtrack_of`, …). It is not an item: no files, never listed in libraries or search results, and no container items are created for it. An item can belong to any number of relations; a member may have an optional `role` (e.g. `from`/`to` for a directed link) and an `ord` for ordering. Hierarchy (`parent_id`) is unrelated. Deleting an item removes its memberships, and a relation left with no members is deleted automatically (also when its last member is removed through the API).
 
-- **RelationSummary**: `{id, type, name, props, member_count, created_at, updated_at}` (`props` is a free JSON object).
+- **RelationSummary**: `{id, type, name, member_count, created_at, updated_at}`. Relations are pure links: a type, an optional name (`label` is accepted as an alias on input), and ordered members with an optional role. There are no free-form props (a `props` key in a request body is ignored).
 - **RelationDetail** = RelationSummary + `members: [{item_id, ord, role, item: ItemSummary}]`, ordered by `ord` then title.
 - **ItemDetail** has `relations: [RelationSummary + ord, role]` (this item's position).
 
 ## Media ingest (server)
 Libraries are no longer scanned. Media enters through the watched ingest directory or the upload
 endpoint, is stored content-addressed and mapped to items from its **file name only**; ffprobe is
-used for technical stream info, ffmpeg for one thumbnail frame. See **[STORAGE.md](STORAGE.md)**.
+used for technical stream info. No image is generated at ingest. See **[STORAGE.md](STORAGE.md)**.
 
 ## Server notes
 Implementation choices where the contract is open; all are additive / backward compatible.
@@ -209,8 +246,6 @@ Implementation choices where the contract is open; all are additive / backward c
 - **Extra fields**: `Library.available` (always true in v3). `Credit.source` = `scan|manual` (`scan` = created by the ingest pipeline, e.g. the `artist` credit of an artist container).
 - **Extra endpoints**: `GET /api/libraries/{id}`, `GET /api/fields/{key}`.
 - **Status codes**: creates (`POST /api/people`, `/api/fields`) return `201`. Deletes return `200 {"ok":true,…}`. Creating a person whose normalized name already exists → `409`. Duplicate field key → `409`. Unknown field key on `PUT .../fields/{key}` → `404` (define it first); derived field → `400`.
-- **Image URLs** carry a cache-busting query (`/image/item/{id}/thumb?v=1a2b3c4d`), so the long `Cache-Control` never serves stale art. The bare path also works.
-- **Images (v3)**: the only artwork is a generated `thumb` (one video frame). Containers (show, season, artist) use their first child's thumb; children without one fall back to their ancestors. `poster`, `backdrop` and the other slots are always null (404). An `images.*` URL is non-null only when that request will succeed.
 - **`/api/items` defaults**: `top=true` is the default only when none of `parent_id`, `kind`, `person_id`, `q` is given (so `kind=episode&library_id=…` lists all episodes). Default sort is `index` when `parent_id` is given, otherwise `title`. Default order is `asc`, except `sort=added`, which defaults to `desc`. `limit` is capped at 1000. `library_id` takes the virtual library ids.
 - **Edits**: `PUT /api/items/{id}/fields/{year|genres|overview}` behaves like PATCH (marks the field locked). `DELETE /api/items/{id}/fields/{key}` removes a user value; on a core field it also unlocks it. User values always override values set by the ingest pipeline for the same key.
 - **Credits**: manual credits (POST) and credits created by the pipeline can both be deleted.
@@ -219,10 +254,10 @@ Implementation choices where the contract is open; all are additive / backward c
 - **Automatic custom fields**: file names with a trailing `[youtubeid]` give the item a `youtube` url field (`https://youtu.be/<id>`, automatic custom definition, placement `info`, order 500).
 - **MediaFile.label** is computed from the probe: `"{height}p · {CODEC}"` for video, `"{CODEC} · {kbps} kbps"` for audio.
 - **Music video names**: `Title ｜ Album ｜ People [ytid]` gives title = first segment with upload noise removed (`DILBAR 8K Full Song` → `DILBAR`) and subtitle = the remaining segments joined by ` · `. `A - B` is read as `Artist - Title`, except when A is ALL CAPS and B is not (`O SAKI SAKI - Nora Fatehi` → title `O SAKI SAKI`).
-- **Config**: see [STORAGE.md](STORAGE.md#configuration) plus `BIND` (default `0.0.0.0:8096`), `FRAME_CACHE_MB`, `FRAME_THREADS`. `LIBRARIES`, `SCAN_INTERVAL`, `LEGACY_DATA_DIR` and `ARTIST_INFO_DIR` are gone. A `DATA_DIR` holding a v2 database is refused at startup (v3 needs a fresh one).
+- **Config**: see [STORAGE.md](STORAGE.md#configuration) (incl. `ASSET_DIR`, `ASSET_DEFAULT_WIDTH`, `ASSET_GC_*`) plus `BIND` (default `0.0.0.0:8096`), `FRAME_CACHE_MB`, `FRAME_THREADS`. `LIBRARIES`, `SCAN_INTERVAL`, `LEGACY_DATA_DIR` and `ARTIST_INFO_DIR` are gone. A `DATA_DIR` holding a v2 database is refused at startup (v3 needs a fresh one).
 - **v2.1 fields kept for shape compatibility** (clients that ignore unknown fields are unaffected):
   - `ItemSummary.index_end`: last episode of a multi-episode file (`S01E04-E05` gives `index` 4, `index_end` 5). Null otherwise.
-  - `ItemSummary.images` also carries `banner`, `clearlogo`, `clearart`, `landscape`, `discart`, `keyart`, `characterart` — always null in v3.
+  - `ItemSummary.images` and `Person.image` are **gone** (see Images). `Person`/`PersonRef` no longer have `image`.
   - `ItemDetail.extras` is always `[]`; the `extra` item kind no longer exists.
   - `MediaFile.part` / `MediaFile.edition` and queue entries' `part` are always null (no stacking or editions; versions are just more files of the item, labelled by resolution/codec).
 

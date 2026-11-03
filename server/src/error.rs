@@ -11,6 +11,7 @@ pub enum AppError {
     NotFound(String),
     BadRequest(String),
     Conflict(String),
+    TooLarge(String),
     Internal(String),
 }
 
@@ -28,7 +29,7 @@ impl AppError {
 impl std::fmt::Display for AppError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            AppError::NotFound(m) | AppError::BadRequest(m) | AppError::Conflict(m) | AppError::Internal(m) => {
+            AppError::NotFound(m) | AppError::BadRequest(m) | AppError::Conflict(m) | AppError::TooLarge(m) | AppError::Internal(m) => {
                 f.write_str(m)
             }
         }
@@ -43,6 +44,7 @@ impl IntoResponse for AppError {
             AppError::NotFound(_) => StatusCode::NOT_FOUND,
             AppError::BadRequest(_) => StatusCode::BAD_REQUEST,
             AppError::Conflict(_) => StatusCode::CONFLICT,
+            AppError::TooLarge(_) => StatusCode::PAYLOAD_TOO_LARGE,
             AppError::Internal(m) => {
                 eprintln!("internal error: {m}");
                 StatusCode::INTERNAL_SERVER_ERROR

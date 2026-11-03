@@ -52,6 +52,7 @@ struct Status {
     queue: QueueStatus,
     ingest_dir: String,
     media_dir: String,
+    asset_dir: String,
     data_dir: String,
     #[serde(flatten)]
     tasks: TaskStatus,
@@ -64,6 +65,7 @@ async fn status(State(st): State<Shared>) -> AppResult<Json<Status>> {
         queue: st.ingest.status(),
         ingest_dir: st.ingest.ingest_dir.to_string_lossy().to_string(),
         media_dir: st.ingest.store.root().to_string_lossy().to_string(),
+        asset_dir: st.assets.store.root().to_string_lossy().to_string(),
         data_dir: st.data_dir.to_string_lossy().to_string(),
         tasks: task_status,
     }))

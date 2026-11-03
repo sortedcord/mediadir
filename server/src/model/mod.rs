@@ -51,7 +51,7 @@ pub struct Item {
     pub updated_at: i64,
     /// Core field names that were manually edited.
     pub locked: Vec<String>,
-    /// Absolute path of the generated thumbnail (DATA_DIR/thumbs).
+    /// Legacy column (generated thumbnails): no longer written or served.
     pub thumb: Option<String>,
     /// Field values produced by the classifier (e.g. `youtube`, `aired`).
     pub extra: JsonMap,
@@ -118,7 +118,7 @@ pub struct Person {
     pub sort_name: Option<String>,
     pub bio: Option<String>,
     pub birth_date: Option<String>,
-    /// Absolute path of the person's image.
+    /// Legacy column: no longer written or served (images are `image` field values).
     pub image: Option<String>,
     pub fields: JsonMap,
 }
@@ -176,5 +176,4 @@ pub struct Credit {
 pub struct PersonRef {
     pub id: String,
     pub name: String,
-    pub image: Option<String>,
 }

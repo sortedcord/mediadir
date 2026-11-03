@@ -98,6 +98,20 @@ pub fn ensure_relations(conn: &Connection) -> Result<(), String> {
     conn.execute_batch(RELATIONS).map_err(|e| e.to_string())
 }
 
+/// Image assets (content-addressed files under ASSET_DIR). Idempotent, run on every startup.
+const ASSETS: &str = r#"
+CREATE TABLE IF NOT EXISTS assets (
+    hash TEXT PRIMARY KEY, mime TEXT NOT NULL, width INTEGER NOT NULL, height INTEGER NOT NULL,
+    size INTEGER NOT NULL, created_at INTEGER NOT NULL,
+    verified_at INTEGER NOT NULL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS assets_created ON assets(created_at);
+"#;
+
+pub fn ensure_assets(conn: &Connection) -> Result<(), String> {
+    conn.execute_batch(ASSETS).map_err(|e| e.to_string())
+}
+
 pub fn migrate(conn: &mut Connection) -> Result<(), String> {
     let version: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0)).map_err(|e| e.to_string())?;
     if version == SCHEMA_VERSION {

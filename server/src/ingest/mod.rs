@@ -1,5 +1,5 @@
 //! Ingest: the two ways media enters MediaDir (the watched INGEST_DIR and uploads) and the one
-//! pipeline both use: settle → hash → probe → place → name→item → thumbnail.
+//! pipeline both use: settle → hash → probe → place → name→item.
 //! See docs/STORAGE.md.
 
 pub mod catalog;
@@ -33,7 +33,6 @@ pub struct Ingest {
     db: Db,
     pub ingest_dir: PathBuf,
     pub store: Store,
-    data_dir: PathBuf,
     settle: Duration,
     poll: Option<Duration>,
     classifier: Box<dyn Classifier>,
@@ -142,7 +141,6 @@ impl Ingest {
             db,
             ingest_dir: cfg.ingest_dir.clone(),
             store,
-            data_dir: cfg.data_dir.clone(),
             settle: cfg.settle,
             poll: cfg.poll,
             classifier: Box::new(FilenameClassifier),
@@ -377,15 +375,6 @@ impl Ingest {
         rec.item_id = Some(attached.item_id.clone());
         rec.file_id = Some(attached.file_id.clone());
 
-        if stored.probe.video.is_some() {
-            let mut item = repo.get_item(&attached.item_id)?;
-            if item.thumb.as_deref().map(|t| !Path::new(t).is_file()).unwrap_or(true) {
-                if let Some(t) = thumb::make_video_thumb(&self.data_dir, &item.id, &dst, stored.probe.duration) {
-                    item.thumb = Some(t);
-                    repo.save_item(&item)?;
-                }
-            }
-        }
         println!(
             "ingest: {} -> {} {} ({}{})",
             rec.name,
@@ -426,10 +415,6 @@ impl Ingest {
             if let Err(e) = self.store.remove_blob(&f.store_path) {
                 eprintln!("ingest: cannot remove blob {}: {e}", f.store_path);
             }
-        }
-        let thumbs = self.data_dir.join("thumbs");
-        for t in items.iter().filter_map(|i| i.thumb.as_ref()).filter(|t| Path::new(t).starts_with(&thumbs)) {
-            let _ = std::fs::remove_file(t);
         }
         Deleted { items: items.len(), files: files.len() }
     }
@@ -547,7 +532,7 @@ mod tests {
         let repo = Repo::new(&conn);
         let item = repo.get_item(r1.item_id.as_ref().unwrap()).unwrap();
         assert_eq!((item.kind.as_str(), item.title.as_str(), item.year), ("movie", "Versions Test", Some(2015)));
-        assert!(item.thumb.as_deref().is_some_and(|t| Path::new(t).is_file()), "thumbnail generated");
+        assert!(item.thumb.is_none(), "no thumbnail is generated at ingest");
         let files = repo.files_for_item(&item.id).unwrap();
         assert_eq!(files.iter().map(|f| f.height()).collect::<Vec<_>>(), vec![180, 90]);
         assert_eq!(files[0].label, "180p · MPEG4");
