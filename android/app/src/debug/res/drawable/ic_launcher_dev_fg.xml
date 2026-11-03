@@ -1,0 +1,8 @@
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp" android:height="108dp" android:viewportWidth="108" android:viewportHeight="108">
+    <!-- play glyph -->
+    <path android:fillColor="#FFFFFF" android:pathData="M44,36 L72,54 L44,72 Z"/>
+    <!-- DEV badge: amber circle with a "D" -->
+    <path android:fillColor="#FFB300" android:pathData="M76,30 m-11,0 a11,11 0 1,0 22,0 a11,11 0 1,0 -22,0"/>
+    <path android:fillColor="#1B1B1F" android:pathData="M72,23.5 h4.5 a6.5,6.5 0 0,1 0,13 h-4.5 Z M74.6,26 v8 h1.9 a4,4 0 0,0 0,-8 Z"/>
+</vector>

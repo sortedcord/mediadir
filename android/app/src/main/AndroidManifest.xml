@@ -3,7 +3,7 @@
     <uses-permission android:name="android.permission.INTERNET" />
     <application
         android:label="${appLabel}"
-        android:icon="@android:drawable/ic_media_play"
+        android:icon="${appIcon}"
         android:theme="@style/Theme.MediaDir"
         android:networkSecurityConfig="@xml/network">
         <activity android:name=".MainActivity" android:exported="true">

@@ -19,9 +19,11 @@ android {
             applicationIdSuffix = ".dev"
             versionNameSuffix = "-dev"
             manifestPlaceholders["appLabel"] = "MediaDir Dev"
+            manifestPlaceholders["appIcon"] = "@mipmap/ic_launcher_dev"
         }
         release {
             manifestPlaceholders["appLabel"] = "MediaDir"
+            manifestPlaceholders["appIcon"] = "@android:drawable/ic_media_play"
             isMinifyEnabled = true
             isShrinkResources = true
             proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
