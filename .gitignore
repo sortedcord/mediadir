@@ -15,3 +15,5 @@ android/local.properties
 .idea/
 *.iml
 __pycache__/
+.venv/
+mcp/*.egg-info/

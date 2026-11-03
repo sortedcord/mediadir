@@ -17,6 +17,10 @@ The server requires a fresh v3 database; it refuses older databases. Keep old da
 
 See [storage and configuration](docs/STORAGE.md) and the [API contract](docs/API.md).
 
+## MCP server for AI agents
+
+`mcp/` holds an MCP server that exposes metadata read/edit tools over the HTTP API. See [mcp/README.md](mcp/README.md).
+
 ## Android
 
 Requires JDK 17 and Android SDK 35. Set `sdk.dir` in `android/local.properties` for your machine.
