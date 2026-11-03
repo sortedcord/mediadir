@@ -71,6 +71,33 @@ CREATE TABLE seen_files (
 CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
 "#;
 
+/// Relations (named groups of items). Idempotent, run on every startup so databases created
+/// before relations existed gain the tables without a wipe.
+const RELATIONS: &str = r#"
+CREATE TABLE IF NOT EXISTS relations (
+    id TEXT PRIMARY KEY, type TEXT NOT NULL, name TEXT NOT NULL DEFAULT '',
+    props TEXT NOT NULL DEFAULT '{}', created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS relation_members (
+    relation_id TEXT NOT NULL, item_id TEXT NOT NULL, ord INTEGER NOT NULL DEFAULT 0, role TEXT,
+    PRIMARY KEY (relation_id, item_id)
+);
+CREATE INDEX IF NOT EXISTS relation_members_item ON relation_members(item_id);
+CREATE INDEX IF NOT EXISTS relations_type ON relations(type);
+-- deleting an item drops its memberships; a relation left with no members goes too
+CREATE TRIGGER IF NOT EXISTS items_relations_cleanup AFTER DELETE ON items BEGIN
+    DELETE FROM relation_members WHERE item_id = old.id;
+END;
+CREATE TRIGGER IF NOT EXISTS relation_members_cleanup AFTER DELETE ON relation_members BEGIN
+    DELETE FROM relations WHERE id = old.relation_id
+        AND NOT EXISTS (SELECT 1 FROM relation_members WHERE relation_id = old.relation_id);
+END;
+"#;
+
+pub fn ensure_relations(conn: &Connection) -> Result<(), String> {
+    conn.execute_batch(RELATIONS).map_err(|e| e.to_string())
+}
+
 pub fn migrate(conn: &mut Connection) -> Result<(), String> {
     let version: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0)).map_err(|e| e.to_string())?;
     if version == SCHEMA_VERSION {

@@ -747,6 +747,104 @@ def main():
         assert libs["shows"] == 2 and libs["videos"] == 7 and libs["movies"] == 7, libs
     check("delete: item / container / version remove blobs; originals not re-ingested", t_delete)
 
+    def t_relations():
+        pool = [i for lib in ("movies", "videos") for i in items(library_id=state[lib]["id"])["items"] if i["playable"]]
+        pool = [i for i in pool if i["title"] != "sample" and not i["title"].startswith("Sintel")]
+        assert len(pool) >= 4, pool
+        a, b, c, d = pool[:4]
+        before = get("/api/relations")["total"]
+        # validation
+        assert req("POST", "/api/relations", {"type": "collection", "members": []})[0] == 400
+        assert req("POST", "/api/relations", {"type": "collection"})[0] == 400
+        assert req("POST", "/api/relations", {"members": [{"item_id": a["id"]}]})[0] == 400
+        assert req("POST", "/api/relations", {"type": "bad-type!", "members": [{"item_id": a["id"]}]})[0] == 400
+        assert req("POST", "/api/relations", {"type": "x", "props": [1], "members": [{"item_id": a["id"]}]})[0] == 400
+        assert req("POST", "/api/relations", {"type": "x", "members": [{"item_id": a["id"]}, {"item_id": a["id"]}]})[0] == 400
+        assert req("POST", "/api/relations", {"type": "x", "members": [{"item_id": "0000000000000000"}]})[0] == 404
+        assert get("/api/relations")["total"] == before, "failed creates must not leave relations behind"
+        # create (type is normalized)
+        rel = req("POST", "/api/relations", {
+            "type": "  Soundtrack Of ", "name": "My Pack", "props": {"color": "red"},
+            "members": [{"item_id": a["id"], "role": "from"}, {"item_id": b["id"], "ord": 5, "role": " to "}]}, expect=201)[1]
+        has(rel, "id", "type", "name", "props", "member_count", "created_at", "updated_at", "members")
+        assert rel["type"] == "soundtrack_of" and rel["name"] == "My Pack" and rel["props"] == {"color": "red"}
+        assert rel["member_count"] == 2
+        ms = rel["members"]
+        assert [m["item_id"] for m in ms] == [a["id"], b["id"]], ms
+        assert [m["ord"] for m in ms] == [0, 5] and [m["role"] for m in ms] == ["from", "to"]
+        for m in ms:
+            has(m, "item_id", "ord", "role", "item")
+            check_summary(m["item"])
+        rid = rel["id"]
+        # list / filter / types
+        lst = get("/api/relations?type=Soundtrack%20Of")
+        assert lst["total"] == 1 and lst["relations"][0]["id"] == rid and lst["relations"][0]["member_count"] == 2, lst
+        assert "members" not in lst["relations"][0]
+        assert get("/api/relations?q=pack")["total"] == 1 and get("/api/relations?q=nomatch")["total"] == 0
+        assert get("/api/relations?type=other_type")["total"] == 0
+        assert get("/api/relations?limit=1&offset=5")["relations"] == []
+        assert {"type": "soundtrack_of", "count": 1} in get("/api/relation-types")
+        # detail + item views
+        assert get(f"/api/relations/{rid}")["members"][0]["item_id"] == a["id"]
+        assert req("GET", "/api/relations/0000000000000000")[0] == 404
+        ir = get(f"/api/items/{b['id']}/relations")
+        assert len(ir) == 1 and ir[0]["id"] == rid and ir[0]["ord"] == 5 and ir[0]["role"] == "to", ir
+        assert [r["id"] for r in get(f"/api/items/{a['id']}")["relations"]] == [rid]
+        assert get(f"/api/items/{c['id']}/relations") == []
+        assert req("GET", "/api/items/0000000000000000/relations")[0] == 404
+        # an item can be in several relations
+        rel2 = req("POST", "/api/relations", {"type": "collection", "members": [{"item_id": a["id"]}]}, expect=201)[1]
+        assert rel2["name"] == "" and rel2["props"] == {}
+        assert {r["id"] for r in get(f"/api/items/{a['id']}/relations")} == {rid, rel2["id"]}
+        # relations never show up as items
+        assert not any(i["id"] in (rid, rel2["id"]) for i in items(top="false")["items"])
+        # patch
+        p = req("PATCH", f"/api/relations/{rid}", {"name": "Renamed", "type": "Album", "props": {"n": 1}}, expect=200)[1]
+        assert p["name"] == "Renamed" and p["type"] == "album" and p["props"] == {"n": 1} and p["member_count"] == 2
+        assert req("PATCH", f"/api/relations/{rid}", {"type": ""})[0] == 400
+        assert req("PATCH", "/api/relations/0000000000000000", {"name": "x"})[0] == 404
+        # member upsert
+        u = req("POST", f"/api/relations/{rid}/members", {"item_id": c["id"], "role": "extra"}, expect=200)[1]
+        assert u["member_count"] == 3 and u["members"][-1]["item_id"] == c["id"] and u["members"][-1]["ord"] == 6, u["members"]
+        u = req("POST", f"/api/relations/{rid}/members", {"item_id": c["id"], "ord": 1}, expect=200)[1]
+        mc = [m for m in u["members"] if m["item_id"] == c["id"]][0]
+        assert u["member_count"] == 3 and mc["ord"] == 1 and mc["role"] == "extra"
+        assert [m["item_id"] for m in u["members"]] == [a["id"], c["id"], b["id"]]
+        assert req("POST", f"/api/relations/{rid}/members", {"item_id": "0000000000000000"})[0] == 404
+        assert req("POST", "/api/relations/0000000000000000/members", {"item_id": a["id"]})[0] == 404
+        # member removal
+        r = req("DELETE", f"/api/relations/{rid}/members/{c['id']}", expect=200)[1]
+        assert r["member_count"] == 2 and c["id"] not in [m["item_id"] for m in r["members"]]
+        assert req("DELETE", f"/api/relations/{rid}/members/{c['id']}")[0] == 404
+        # replace
+        r = req("PUT", f"/api/relations/{rid}/members", {"members": [{"item_id": c["id"]}, {"item_id": d["id"], "role": "to"}]}, expect=200)[1]
+        assert [m["item_id"] for m in r["members"]] == [c["id"], d["id"]] and r["members"][1]["role"] == "to"
+        assert get(f"/api/items/{a['id']}/relations")[0]["id"] == rel2["id"]
+        assert req("PUT", f"/api/relations/{rid}/members", {"members": [{"item_id": "0000000000000000"}]})[0] == 404
+        assert get(f"/api/relations/{rid}")["member_count"] == 2, "failed replace must roll back"
+        # last member removed via the API -> relation deleted
+        s, _ = req("DELETE", f"/api/relations/{rel2['id']}/members/{a['id']}", expect=204)
+        assert req("GET", f"/api/relations/{rel2['id']}")[0] == 404
+        # empty replace -> relation deleted
+        req("PUT", f"/api/relations/{rid}/members", {"members": []}, expect=204)
+        assert req("GET", f"/api/relations/{rid}")[0] == 404
+        # delete relation leaves items alone
+        r3 = req("POST", "/api/relations", {"type": "collection", "members": [{"item_id": a["id"]}, {"item_id": b["id"]}]}, expect=201)[1]
+        req("DELETE", f"/api/relations/{r3['id']}", expect=204)
+        assert req("GET", f"/api/relations/{r3['id']}")[0] == 404
+        assert req("DELETE", f"/api/relations/{r3['id']}")[0] == 404
+        get(f"/api/items/{a['id']}"); get(f"/api/items/{b['id']}")
+        # deleting an item removes its membership; a relation left empty is deleted
+        r4 = req("POST", "/api/relations", {"type": "collection", "members": [{"item_id": c["id"]}, {"item_id": d["id"]}]}, expect=201)[1]
+        r5 = req("POST", "/api/relations", {"type": "collection", "members": [{"item_id": d["id"]}]}, expect=201)[1]
+        req("DELETE", f"/api/items/{d['id']}", expect=200)
+        assert get(f"/api/relations/{r4['id']}")["member_count"] == 1
+        assert req("GET", f"/api/relations/{r5['id']}")[0] == 404
+        req("DELETE", f"/api/items/{c['id']}", expect=200)
+        assert req("GET", f"/api/relations/{r4['id']}")[0] == 404
+        assert get("/api/relations")["total"] == before
+    check("relations: CRUD, members, types, item views, auto-delete, validation", t_relations)
+
     def t_tasks():
         s = status()
         if not (s["last_sidecar_sync"] or s["last_verify"] or s["last_backup"]):

@@ -180,6 +180,23 @@ All JSON. Errors: non-2xx with `{ "error": "message" }`.
 | POST | `/api/ingest/scan` | *v3:* force a poll of the ingest dir, 202 |
 | POST | `/api/ingest/upload` | *v3:* raw body + `X-Filename` |
 | GET | `/image/person/{id}` | 404 if none |
+| GET | `/api/relations` | *v3:* `type, q, limit=50, offset=0` → `{total, relations:[RelationSummary]}` |
+| GET | `/api/relation-types` | `[{type, count}]` for types in use |
+| POST | `/api/relations` | `{type, name?, props?, members:[{item_id, ord?, role?}]}` → `201` RelationDetail. `type` is normalized (trim, lowercase, spaces → `_`, `[a-z0-9_]`, else `400`); at least one member, unique, existing items (`404` for unknown items) |
+| GET | `/api/relations/{id}` | RelationDetail |
+| PATCH | `/api/relations/{id}` | `{name?, type?, props?}` → RelationDetail |
+| DELETE | `/api/relations/{id}` | `204`; member items are untouched |
+| PUT | `/api/relations/{id}/members` | `{members:[…]}` replaces the member list → RelationDetail; an empty list deletes the relation (`204`) |
+| POST | `/api/relations/{id}/members` | `{item_id, ord?, role?}` add or update one member → RelationDetail. A missing `ord`/`role` keeps the current value (new members append); `role: ""` clears it |
+| DELETE | `/api/relations/{id}/members/{item_id}` | → RelationDetail, or `204` when that was the last member and the relation was removed |
+| GET | `/api/items/{id}/relations` | `[RelationSummary + ord, role]` for every relation the item is in |
+
+## Relations (v3)
+A relation is a named group of items of a free-form `type` (`collection`, `album`, `soundtrack_of`, …). It is not an item: no files, never listed in libraries or search results, and no container items are created for it. An item can belong to any number of relations; a member may have an optional `role` (e.g. `from`/`to` for a directed link) and an `ord` for ordering. Hierarchy (`parent_id`) is unrelated. Deleting an item removes its memberships, and a relation left with no members is deleted automatically (also when its last member is removed through the API).
+
+- **RelationSummary**: `{id, type, name, props, member_count, created_at, updated_at}` (`props` is a free JSON object).
+- **RelationDetail** = RelationSummary + `members: [{item_id, ord, role, item: ItemSummary}]`, ordered by `ord` then title.
+- **ItemDetail** has `relations: [RelationSummary + ord, role]` (this item's position).
 
 ## Media ingest (server)
 Libraries are no longer scanned. Media enters through the watched ingest directory or the upload

@@ -5,11 +5,13 @@ mod files;
 mod ingest;
 mod items;
 mod people;
+mod relations;
 mod schema;
 
 pub use ingest::{IngestRecord, SeenKey};
 pub use items::{ItemQuery, Removed};
 pub use people::{default_sort_name, CreditDraft, PeopleQuery};
+pub use relations::{new_relation_id, normalize_type, Member, Membership, Relation, RelationQuery};
 
 use crate::error::{AppError, AppResult};
 use r2d2_sqlite::SqliteConnectionManager;
@@ -36,6 +38,7 @@ impl Db {
         let pool = r2d2::Pool::builder().max_size(8).build(manager)?;
         let mut conn = pool.get()?;
         schema::migrate(&mut conn).map_err(AppError::Internal)?;
+        schema::ensure_relations(&conn).map_err(AppError::Internal)?;
         Ok(Db { pool })
     }
 

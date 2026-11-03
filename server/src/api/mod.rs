@@ -6,6 +6,7 @@ mod items;
 mod libraries;
 mod media;
 mod people;
+mod relations;
 mod search;
 pub mod views;
 
@@ -35,6 +36,7 @@ pub fn router(state: Shared) -> Router {
         .merge(ingest::routes())
         .merge(items::routes())
         .merge(people::routes())
+        .merge(relations::routes())
         .merge(fields::routes())
         .merge(search::routes())
         .layer(CompressionLayer::new());

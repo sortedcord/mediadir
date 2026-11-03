@@ -1,6 +1,6 @@
 //! Response DTOs and their assembly from domain objects (the contract's JSON shapes).
 
-use crate::db::Repo;
+use crate::db::{Member, Membership, Relation, Repo};
 use crate::display::{FieldRegistry, PresentContext, Presenter};
 use crate::error::AppResult;
 use crate::model::{
@@ -107,6 +107,43 @@ pub struct ItemDetail {
     pub extras: Vec<ItemSummary>,
     pub fields: JsonMap,
     pub display: Vec<DisplayBlock>,
+    pub relations: Vec<ItemRelation>,
+}
+
+#[derive(Serialize)]
+pub struct RelationSummary {
+    pub id: String,
+    #[serde(rename = "type")]
+    pub rtype: String,
+    pub name: String,
+    pub props: JsonMap,
+    pub member_count: i64,
+    pub created_at: i64,
+    pub updated_at: i64,
+}
+
+/// A relation as seen from one of its members.
+#[derive(Serialize)]
+pub struct ItemRelation {
+    #[serde(flatten)]
+    pub relation: RelationSummary,
+    pub ord: i64,
+    pub role: Option<String>,
+}
+
+#[derive(Serialize)]
+pub struct RelationMember {
+    pub item_id: String,
+    pub ord: i64,
+    pub role: Option<String>,
+    pub item: ItemSummary,
+}
+
+#[derive(Serialize)]
+pub struct RelationDetail {
+    #[serde(flatten)]
+    pub summary: RelationSummary,
+    pub members: Vec<RelationMember>,
 }
 
 #[derive(Serialize)]
@@ -383,7 +420,41 @@ impl<'r, 'c> Views<'r, 'c> {
             extras: vec![],
             fields: merged,
             display,
+            relations: self.item_relations(&item.id)?,
         })
+    }
+
+    pub fn relation_summary(r: &Relation) -> RelationSummary {
+        RelationSummary {
+            id: r.id.clone(),
+            rtype: r.rtype.clone(),
+            name: r.name.clone(),
+            props: r.props.clone(),
+            member_count: r.member_count,
+            created_at: r.created_at,
+            updated_at: r.updated_at,
+        }
+    }
+
+    pub fn item_relations(&self, item_id: &str) -> AppResult<Vec<ItemRelation>> {
+        Ok(self
+            .repo
+            .relations_for_item(item_id)?
+            .iter()
+            .map(|Membership { relation, ord, role }| ItemRelation {
+                relation: Self::relation_summary(relation),
+                ord: *ord,
+                role: role.clone(),
+            })
+            .collect())
+    }
+
+    pub fn relation_detail(&self, r: &Relation) -> AppResult<RelationDetail> {
+        let mut members = vec![];
+        for (Member { item_id, ord, role }, item) in self.repo.relation_members(&r.id)? {
+            members.push(RelationMember { item_id, ord, role, item: self.summary(&item)? });
+        }
+        Ok(RelationDetail { summary: Self::relation_summary(r), members })
     }
 
     pub fn person_summary(&self, p: &Person) -> AppResult<PersonSummary> {
