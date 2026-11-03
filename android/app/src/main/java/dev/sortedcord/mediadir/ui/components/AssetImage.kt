@@ -32,7 +32,7 @@ fun AssetImage(hash: String?, width: Dp, height: Dp? = null, modifier: Modifier 
     AsyncImage(req, description, modifier, contentScale = contentScale)
 }
 
-/** Resolves images that are not in a list summary: the item's own fields, then its parent chain. In-memory cache. */
+/** Resolves card images missing from a summary by walking the parent chain (parents' summaries carry images). In-memory cache. */
 object ImageResolver {
     private val NONE = ""
     private val cards = ConcurrentHashMap<String, String>()
@@ -40,10 +40,10 @@ object ImageResolver {
 
     fun clear() { cards.clear(); persons.clear() }
 
-    /** Card image for [item]: summary values, own fields, then parents. */
+    /** Card image for [item]: its summary images (no fetch), else the parent chain (fetched only then, cached). */
     suspend fun card(item: ItemSummary): String? {
         ImagePolicy.card(item.imageValues)?.let { return it }
-        return byId(item.id)
+        return item.parentId?.let { byId(it) }
     }
 
     /** Card image of the item with this id, falling back along the parent chain. */
@@ -56,7 +56,7 @@ object ImageResolver {
             if (cached != null) { found = cached.takeIf { it != NONE }; break }
             visited += cur
             val d = runCatching { Graph.repo.item(cur!!) }.getOrNull() ?: return null
-            found = ImagePolicy.card(d.fields)
+            found = ImagePolicy.card(d.summary.imageValues).takeIf { it != null } ?: ImagePolicy.card(d.fields)
             if (found != null) break
             cur = d.summary.parentId
         }

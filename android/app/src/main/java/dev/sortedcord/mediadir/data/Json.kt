@@ -38,7 +38,7 @@ internal object Json {
 
     fun library(o: JSONObject) = Library(o.optString("id"), o.optString("name"), o.optString("kind"), o.str("path"), o.int("item_count") ?: 0, o.optBoolean("scanning"))
 
-    fun personRef(o: JSONObject) = PersonRef(o.optString("id"), o.optString("name"))
+    fun personRef(o: JSONObject) = PersonRef(o.optString("id"), o.optString("name"), fieldsMap(o.optJSONObject("images")))
 
     fun block(o: JSONObject) = DisplayBlock(
         key = o.optString("key"), label = o.optString("label"), type = o.optString("type", "text"),
@@ -54,6 +54,7 @@ internal object Json {
         parentIndex = o.int("parent_index"), duration = o.dbl("duration"), playable = o.optBoolean("playable"),
         childCount = o.int("child_count"), aspect = o.str("aspect") ?: "landscape",
         addedAt = o.long("added_at"), card = o.arr("card").map(::block).sortedBy { it.order }, indexEnd = o.int("index_end"),
+        images = fieldsMap(o.optJSONObject("images")),
     )
 
     fun relationSummary(o: JSONObject) = RelationSummary(
@@ -90,7 +91,7 @@ internal object Json {
         relations = o.arr("relations").map(::relationSummary),
     )
 
-    fun person(o: JSONObject) = Person(o.optString("id"), o.optString("name"), o.str("sort_name"), o.int("credit_count") ?: 0)
+    fun person(o: JSONObject) = Person(o.optString("id"), o.optString("name"), o.str("sort_name"), o.int("credit_count") ?: 0, fieldsMap(o.optJSONObject("images")))
 
     fun personDetail(o: JSONObject) = PersonDetail(
         person = person(o), bio = o.str("bio"), birthDate = o.str("birth_date"), fields = fieldsMap(o.optJSONObject("fields")),

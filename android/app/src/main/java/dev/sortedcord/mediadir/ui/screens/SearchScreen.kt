@@ -67,7 +67,7 @@ fun SearchScreen(nav: Nav, vm: SearchViewModel = viewModel()) {
                             Text("People", style = MaterialTheme.typography.titleMedium)
                             Spacer(Modifier.height(8.dp))
                             LazyRow(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                                items(r.people, key = { it.id }) { p -> PersonTile(p.id, p.name, "${p.creditCount} credits", nav::person) }
+                                items(r.people, key = { it.id }) { p -> PersonTile(p.id, p.name, "${p.creditCount} credits", nav::person, images = p.images) }
                             }
                         }
                     }

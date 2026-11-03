@@ -59,7 +59,7 @@ fun PersonScreen(nav: Nav, id: String, vm: PersonViewModel = viewModel(key = "pe
                 LazyColumn(contentPadding = PaddingValues(bottom = 24.dp)) {
                     item {
                         Column(Modifier.fillMaxWidth().padding(16.dp), horizontalAlignment = Alignment.CenterHorizontally) {
-                            Avatar(p.person.id, p.person.name, 140.dp, hash = ImagePolicy.person(p.fields))
+                            Avatar(p.person.id, p.person.name, 140.dp, hash = ImagePolicy.person(p.fields), images = p.person.images)
                             Spacer(Modifier.height(12.dp))
                             Text(p.person.name, style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold, color = Color.White)
                             p.birthDate?.let { Text("Born $it", color = Muted, fontSize = 13.sp) }

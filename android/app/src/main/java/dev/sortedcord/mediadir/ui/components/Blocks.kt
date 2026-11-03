@@ -127,7 +127,7 @@ fun SectionBlock(b: DisplayBlock, onPerson: (String) -> Unit) {
         SectionTitle(b.label)
         when (b.widget) {
             "people" -> LazyRow(contentPadding = PaddingValues(horizontal = 16.dp), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                items(b.people, key = { it.id }) { p -> PersonTile(p.id, p.name, null, onPerson) }
+                items(b.people, key = { it.id }) { p -> PersonTile(p.id, p.name, null, onPerson, images = p.images) }
             }
             "markdown", "text" -> Column(Modifier.padding(horizontal = 16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 b.text.split(Regex("\n\\s*\n")).map { it.trim() }.filter { it.isNotEmpty() }.forEach {

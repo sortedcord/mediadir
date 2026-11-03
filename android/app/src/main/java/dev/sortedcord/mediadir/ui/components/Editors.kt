@@ -50,7 +50,7 @@ fun PersonPicker(onPick: (Person?, String?) -> Unit, allowCreate: Boolean = true
         OutlinedTextField(q, { q = it }, label = { Text(label) }, singleLine = true, modifier = Modifier.fillMaxWidth())
         results.forEach { p ->
             Row(Modifier.fillMaxWidth().clickable { onPick(p, null); q = "" }.padding(vertical = 6.dp), verticalAlignment = Alignment.CenterVertically) {
-                Avatar(p.id, p.name, 32.dp); Spacer(Modifier.width(10.dp))
+                Avatar(p.id, p.name, 32.dp, images = p.images); Spacer(Modifier.width(10.dp))
                 Text(p.name, Modifier.weight(1f)); Text("${p.creditCount}", color = Muted, fontSize = 12.sp)
             }
         }

@@ -1,5 +1,6 @@
 package dev.sortedcord.mediadir.ui.components
 
+import dev.sortedcord.mediadir.domain.ImagePolicy
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
@@ -37,8 +38,10 @@ fun <T> StateContent(state: UiState<T>, onRetry: () -> Unit, content: @Composabl
 }
 
 @Composable
-fun Avatar(personId: String?, name: String, size: Dp, modifier: Modifier = Modifier, hash: String? = null) {
-    val photo = hash ?: personId?.let { id -> produceState<String?>(null, id) { value = ImageResolver.person(id) }.value }
+fun Avatar(personId: String?, name: String, size: Dp, modifier: Modifier = Modifier, hash: String? = null, images: Map<String, Any?>? = null) {
+    // `images` (from PersonRef/Person summaries) is authoritative: no fetch. Only with neither hash nor images is the person fetched.
+    val photo = hash ?: images?.let { ImagePolicy.person(it) }
+        ?: if (images == null) personId?.let { id -> produceState<String?>(null, id) { value = ImageResolver.person(id) }.value } else null
     Box(modifier.size(size).clip(CircleShape).background(CardBg), contentAlignment = Alignment.Center) {
         val initials = name.split(' ').filter { it.isNotBlank() }.take(2).joinToString("") { it.take(1).uppercase() }
         if (initials.isNotEmpty()) Text(initials, color = Muted, fontSize = (size.value / 3).sp)
@@ -48,9 +51,9 @@ fun Avatar(personId: String?, name: String, size: Dp, modifier: Modifier = Modif
 }
 
 @Composable
-fun PersonTile(id: String, name: String, caption: String?, onClick: (String) -> Unit, hash: String? = null) {
+fun PersonTile(id: String, name: String, caption: String?, onClick: (String) -> Unit, hash: String? = null, images: Map<String, Any?>? = null) {
     Column(Modifier.width(84.dp).clickable { onClick(id) }, horizontalAlignment = Alignment.CenterHorizontally) {
-        Avatar(id, name, 72.dp, hash = hash)
+        Avatar(id, name, 72.dp, hash = hash, images = images)
         Spacer(Modifier.height(6.dp))
         Text(name, fontSize = 12.sp, maxLines = 2, overflow = TextOverflow.Ellipsis, textAlign = TextAlign.Center, color = Color.White)
         caption?.let { Text(it, fontSize = 11.sp, color = Muted, maxLines = 1, overflow = TextOverflow.Ellipsis, textAlign = TextAlign.Center) }

@@ -88,7 +88,7 @@ fun ItemEditSheet(vm: ItemViewModel, d: ItemDetail, onDismiss: () -> Unit) {
             Text("Credits", style = MaterialTheme.typography.titleMedium)
             d.credits.forEach { c ->
                 Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.padding(vertical = 4.dp)) {
-                    Avatar(c.person.id, c.person.name, 32.dp); Spacer(Modifier.width(10.dp))
+                    Avatar(c.person.id, c.person.name, 32.dp, images = c.person.images); Spacer(Modifier.width(10.dp))
                     Column(Modifier.weight(1f)) {
                         Text(c.person.name, color = Color.White)
                         Text(c.role.titleCase() + (c.character?.let { " · $it" } ?: ""), color = Muted, fontSize = 12.sp)

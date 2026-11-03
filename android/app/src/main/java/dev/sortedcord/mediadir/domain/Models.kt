@@ -2,7 +2,7 @@ package dev.sortedcord.mediadir.domain
 
 data class Library(val id: String, val name: String, val kind: String, val path: String?, val itemCount: Int, val scanning: Boolean)
 
-data class PersonRef(val id: String, val name: String)
+data class PersonRef(val id: String, val name: String, val images: Map<String, Any?> = emptyMap())
 
 data class DisplayBlock(
     val key: String, val label: String, val type: String, val widget: String, val placement: String,
@@ -15,9 +15,11 @@ data class ItemSummary(
     val subtitle: String?, val year: Int?, val index: Int?, val parentIndex: Int?, val duration: Double?,
     val playable: Boolean, val childCount: Int?, val aspect: String, val addedAt: Long?,
     val card: List<DisplayBlock>, val indexEnd: Int? = null,
+    /** Raw values of ALL image fields of the item (server sends them regardless of placement). */
+    val images: Map<String, Any?> = emptyMap(),
 ) {
-    /** Image-typed field values visible in the summary (only fields with a card placement). Input for [ImagePolicy]. */
-    val imageValues: Map<String, Any?> get() = card.filter { it.type == "image" }.associate { it.key to it.value }
+    /** Image field values carried by the summary. Input for [ImagePolicy]. */
+    val imageValues: Map<String, Any?> get() = images
 
     /** "E01" or "E01–E02" for multi-episode files. */
     val episodeLabel: String? get() = index?.let { i -> "E%02d".format(i) + (indexEnd?.takeIf { it > i }?.let { "–E%02d".format(it) } ?: "") }
@@ -57,7 +59,7 @@ data class ItemDetail(
     val relations: List<RelationSummary> = emptyList(),
 )
 
-data class Person(val id: String, val name: String, val sortName: String?, val creditCount: Int)
+data class Person(val id: String, val name: String, val sortName: String?, val creditCount: Int, val images: Map<String, Any?> = emptyMap())
 data class PersonCredit(val id: String, val role: String, val character: String?, val item: ItemSummary)
 data class PersonDetail(
     val person: Person, val bio: String?, val birthDate: String?, val fields: Map<String, Any?>,

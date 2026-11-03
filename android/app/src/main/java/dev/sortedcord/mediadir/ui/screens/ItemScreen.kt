@@ -202,7 +202,7 @@ private fun ItemContent(nav: Nav, vm: ItemViewModel, d: ItemDetail, resumeTick: 
             SectionTitle("Cast & crew")
             LazyRow(contentPadding = PaddingValues(horizontal = 16.dp), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
                 items(d.credits, key = { it.id }) { c ->
-                    PersonTile(c.person.id, c.person.name, c.character ?: c.role.titleCase(), nav::person)
+                    PersonTile(c.person.id, c.person.name, c.character ?: c.role.titleCase(), nav::person, images = c.person.images)
                 }
             }
         }
