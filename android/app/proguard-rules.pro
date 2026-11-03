@@ -1,0 +1,2 @@
+-keep class androidx.media3.decoder.ffmpeg.** { *; }
+-dontwarn org.jellyfin.**

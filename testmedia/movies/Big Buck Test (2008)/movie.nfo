@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<movie>
+  <title>Big Buck Test</title>
+  <sorttitle>Big Buck Test</sorttitle>
+  <year>2008</year>
+  <plot>A giant rabbit takes revenge on three rodents. *Synthetic* test fixture.</plot>
+  <tagline>One big rabbit.</tagline>
+  <genre>Animation</genre><genre>Comedy</genre>
+  <rating>7.5</rating>
+  <mpaa>Rated PG</mpaa>
+  <studio>Blender Foundation</studio>
+  <director>Sacha Goedegebure</director>
+  <writer>Sacha Goedegebure</writer>
+  <actor><name>Big Buck Bunny</name><role>Himself</role><order>0</order><thumb>bunny.jpg</thumb></actor>
+  <actor><name>Frank Rodent</name><role>Frank</role><order>1</order></actor>
+  <mood>Cheerful</mood>
+  <budget>150000</budget>
+  <set><name>Test Collection</name></set>
+</movie>
