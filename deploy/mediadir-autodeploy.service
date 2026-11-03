@@ -1,0 +1,10 @@
+[Unit]
+Description=MediaDir: pull, build and deploy new commits
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+Environment=HOME=/root
+ExecStart=/root/mediadir/deploy/autodeploy.sh
+Nice=10

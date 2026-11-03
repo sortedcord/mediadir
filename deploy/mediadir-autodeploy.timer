@@ -1,0 +1,10 @@
+[Unit]
+Description=Check for MediaDir updates every 2 minutes
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=2min
+Unit=mediadir-autodeploy.service
+
+[Install]
+WantedBy=timers.target
