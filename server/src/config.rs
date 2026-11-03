@@ -28,6 +28,11 @@ pub struct Config {
     pub verify_interval: Option<Duration>,
     pub backup_interval: Option<Duration>,
     pub backup_keep: usize,
+    /// Optional root of referenced media: symlinks in INGEST_DIR to files under it are catalogued
+    /// in place (never copied, linked, moved or written). `None` = feature off.
+    pub external_root: Option<PathBuf>,
+    /// Background full-hash rate for referenced files, bytes/second (`0` = unlimited).
+    pub lazy_hash_rate: u64,
 }
 
 fn absolute(p: PathBuf) -> PathBuf {
@@ -60,6 +65,8 @@ impl Config {
             verify_interval: every("VERIFY_INTERVAL", 86400),
             backup_interval: every("BACKUP_INTERVAL", 21600),
             backup_keep: secs("BACKUP_KEEP", 14).max(1) as usize,
+            external_root: env("EXTERNAL_ROOT").map(|v| absolute(PathBuf::from(v.trim()))),
+            lazy_hash_rate: secs("LAZY_HASH_MB_S", 64) * 1024 * 1024,
         }
     }
 
@@ -73,6 +80,13 @@ impl Config {
         for (name, d) in [("INGEST_DIR", i), ("MEDIA_DIR", m)] {
             if a.starts_with(d) || d.starts_with(a) {
                 return Err(format!("ASSET_DIR ({}) and {name} ({}) must not contain each other", a.display(), d.display()));
+            }
+        }
+        if let Some(x) = &self.external_root {
+            for (name, d) in [("MEDIA_DIR", m), ("ASSET_DIR", a), ("DATA_DIR", &self.data_dir)] {
+                if x.starts_with(d) || d.starts_with(x) {
+                    return Err(format!("EXTERNAL_ROOT ({}) and {name} ({}) must not contain each other", x.display(), d.display()));
+                }
             }
         }
         Ok(())

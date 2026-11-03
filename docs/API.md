@@ -82,7 +82,7 @@ ItemSummary (lists, children, search, relation members, credits, playback, ...).
 ```json
 {
   "id": "…", "path": "Original File Name.mkv", "label": "4320p · AV1", "original": true,
-  "hash": "<blake3 hex>", "original_name": "Original File Name.mkv", "added_at": 1793433022,
+  "hash": "<blake3 hex>", "location": "store", "hash_state": "full", "original_name": "Original File Name.mkv", "added_at": 1793433022,
   "container": "mkv", "mime": "video/x-matroska", "size": 551123344, "duration": 178.4, "bitrate": 24600000,
   "video": { "codec": "av1", "profile": "Main", "width": 7680, "height": 4320, "fps": 29.97, "hdr": null, "bit_depth": 8 },
   "audio": [ { "index": 1, "codec": "opus", "channels": 2, "language": "eng", "title": null } ],
@@ -94,6 +94,11 @@ ItemSummary (lists, children, search, relation members, credits, playback, ...).
 *v3:* `path` is the file name the media arrived with (the stored blob's location is private);
 `hash` (BLAKE3), `original_name`, `added_at` are new. Every file is `original: true`; subtitles are
 the embedded streams only (`external` is always null; there is no `/subtitle` endpoint).
+*Referenced media* (see [STORAGE.md](STORAGE.md#referenced-media)): `location` is `"store"` (MediaDir's own
+copy) or `"external"` (catalogued in place under `EXTERNAL_ROOT`; streaming/frames work the same).
+`hash_state` is `"full"` (`hash` = BLAKE3 hex) or `"pending"` (only external files: `hash` is `fp:<64 hex>`, a quick
+fingerprint, until the background task has the full hash; clients must not treat it as a BLAKE3). Both fields are
+always present.
 
 ### Person / Credit
 ```json
@@ -182,7 +187,7 @@ All JSON. Errors: non-2xx with `{ "error": "message" }`.
 | POST | `/api/assets` | *v3:* upload an image, raw body → `{hash, mime, width, height, size}` (see [Images](#images-v3)) |
 | GET | `/asset/{hash}` | *v3:* original or transformed image, `w,h,fit,fmt,q,original` |
 | GET | `/api/ingest` · `/api/ingest/{id}` | *v3:* ingest records ([STORAGE.md](STORAGE.md)) |
-| GET | `/api/ingest/status` | *v3:* watcher/queue/task status |
+| GET | `/api/ingest/status` | *v3:* watcher/queue/task status, plus `external_root` (string or null) and `pending_hashes` (referenced files still awaiting their full hash). `problems[].problem` is `missing`, `corrupt` or `changed` |
 | POST | `/api/ingest/scan` | *v3:* force a poll of the ingest dir, 202 |
 | POST | `/api/ingest/upload` | *v3:* raw body + `X-Filename` |
 | GET | `/api/relations` | *v3:* `type, q, limit=50, offset=0` → `{total, relations:[RelationSummary]}` |

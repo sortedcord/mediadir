@@ -17,6 +17,8 @@ tools. Media enters through one of two doors and lives in a private, content-add
 | `INGEST_SETTLE_SECS` | A file must be unchanged (size + mtime) this long before it's ingested, so partial downloads/copies are never taken. | `10` |
 | `SIDECAR_INTERVAL` | Seconds between sidecar manifest sync runs. | `3600` |
 | `VERIFY_INTERVAL` | Seconds between integrity check runs. | `86400` |
+| `EXTERNAL_ROOT` | Optional. Root of [referenced media](#referenced-media): symlinks in `INGEST_DIR` to files under it are catalogued in place. Unset = feature off. May be a read-only mount. Must not contain/be inside `MEDIA_DIR`, `ASSET_DIR` or `DATA_DIR`. | unset |
+| `LAZY_HASH_MB_S` | Read-rate cap (MiB/s) of the background full hash of referenced files (`0` = unlimited). | `64` |
 | `BACKUP_INTERVAL` / `BACKUP_KEEP` | Database backup cadence (seconds) and how many to keep. | `21600` / `14` |
 
 ## Two ways in
@@ -98,10 +100,51 @@ chooses, ranks or falls back between images; the client decides which one is sho
   `item_id`. The `assets` table is part of the database backups; back up `ASSET_DIR` together with `MEDIA_DIR`.
   No sidecars are written for assets (the file name is the hash, the mime is the extension).
 
+## Referenced media
+For big libraries that already live on another disk (e.g. `/mnt/sdb1/Movies`), MediaDir can catalogue
+files **in place** instead of owning a copy. One external root is configured with `EXTERNAL_ROOT`; the
+user then places a **symlink** in `INGEST_DIR` pointing at a file under it:
+
+```sh
+ln -s /mnt/sdb1/Movies/Some.Film.2012.mkv "$INGEST_DIR/"      # the link's name is the file name used for naming
+```
+
+- **Never touched.** A reference is not reflinked, hardlinked, moved or copied, and MediaDir never
+  writes to, chmods or deletes the target or anything under `EXTERNAL_ROOT` (read-only mounts work).
+  Everything else is the normal pipeline: settle → identify → ffprobe → name → item. The link is
+  remembered in `seen_files` (like a hardlinked original) so it is not imported twice; it is left in place.
+- **Rejected with an ingest record error** (`state: failed`, nothing catalogued): a symlink whose
+  canonicalized target is outside `EXTERNAL_ROOT` (symlink chains and `..` are resolved first), a dangling
+  link, a target that is not a regular file, or any symlink while `EXTERNAL_ROOT` is unset. Fix the link and
+  `POST /api/ingest/scan` (or replace it) to retry. Non-symlink files behave exactly as before.
+- **Row.** `media_files` gets `location` (`store` | `external`), `hash_state` (`full` | `pending`),
+  `fingerprint` and `src_mtime` (columns are added by an idempotent startup migration; existing rows are
+  `store`/`full`). For external files `store_path` is relative to `EXTERNAL_ROOT`.
+- **Lazy hashing.** Hashing a multi-GB file over a slow disk at ingest would block cataloguing, so a reference
+  gets a **fingerprint** = BLAKE3 over a domain tag, the file size, the first 4 MiB and the last 4 MiB (files
+  <= 8 MiB are read whole). Until the full hash is known the unique `hash` column holds `fp:<64 hex>`
+  (prefixed so it can never equal a real BLAKE3) with `hash_state = pending`; it is the file's identity and the
+  dedup key (the same target linked twice is a `duplicate`). A background task, **one file at a time and
+  rate-limited** (`LAZY_HASH_MB_S`), computes the full BLAKE3 and replaces `hash` with it
+  (`hash_state = full`); the file/item ids never change. If the full hash equals an already catalogued file
+  (e.g. the same movie also lives in the store) the referenced row is a duplicate: it is dropped (and its item
+  too, if it had no other files; database rows only), and its ingest records become `duplicate` of the existing
+  file. The fingerprint is not a content guarantee (a change in the middle with identical size and edges is
+  not seen) — that is why the full hash follows. Once `full`, the file joins the normal full-rehash rotation.
+- **Serving.** `/stream` (HTTP Range), ffprobe and `/frame` read straight from `EXTERNAL_ROOT/<store_path>`.
+- **Deleting** (`DELETE /api/items/{id}` / `/api/files/{id}`) removes only database rows and DATA_DIR
+  caches; the target and the symlink are left alone (the symlink is not re-imported).
+- **Integrity.** Every verify run checks each referenced file's existence, size and mtime. Missing is
+  reported as `missing`; a changed size/mtime is reported as `changed` (once), the file is re-fingerprinted
+  and its hash goes back to `pending` (size updated; it is not re-probed). Nothing is ever deleted.
+- **Sidecars.** Not written for referenced files (nothing is written next to or about them; the database
+  and its backups are the source of truth for them).
+- **Status.** `GET /api/ingest/status` includes `external_root` and `pending_hashes`.
+
 ## Deleting
 `DELETE /api/items/{id}` removes the item (and its children) and every stored file that is no longer
 referenced. Files left in the ingest dir are untouched and are **not** re-ingested (their inode is remembered).
-`DELETE /api/files/{id}` removes one version.
+`DELETE /api/files/{id}` removes one version. [Referenced](#referenced-media) files only lose their database rows.
 
 ## Libraries
 Libraries are virtual: one per item kind that has items (`movies`, `shows`, `music`, `music_videos`,

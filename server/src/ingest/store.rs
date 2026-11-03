@@ -86,6 +86,63 @@ pub fn hash_file(path: &Path) -> io::Result<(String, u64)> {
     Ok((hasher.finalize().to_hex().to_string(), hasher.count()))
 }
 
+/// Bytes read from each end of a referenced file for its quick fingerprint.
+pub const FP_EDGE: u64 = 4 * 1024 * 1024;
+
+/// Quick identity of a (possibly huge, possibly remote) file: BLAKE3 over a domain tag, the size,
+/// the first 4 MiB and the last 4 MiB (no overlap; files <= 8 MiB are hashed whole).
+/// Read-only. Returns (hex, size, mtime in ns) from the opened handle.
+pub fn fingerprint(path: &Path) -> io::Result<(String, u64, i64)> {
+    use std::io::{Read, Seek, SeekFrom};
+    use std::os::unix::fs::MetadataExt;
+    let mut f = File::open(path)?;
+    let m = f.metadata()?;
+    if !m.is_file() {
+        return Err(io::Error::other("not a regular file"));
+    }
+    let size = m.len();
+    let mut h = blake3::Hasher::new();
+    h.update(b"mediadir-fp1\0");
+    h.update(&size.to_le_bytes());
+    let head = size.min(FP_EDGE);
+    let mut buf = vec![0u8; head as usize];
+    f.read_exact(&mut buf)?;
+    h.update(&buf);
+    let tail_start = size.saturating_sub(FP_EDGE).max(head);
+    if tail_start < size {
+        let mut buf = vec![0u8; (size - tail_start) as usize];
+        f.seek(SeekFrom::Start(tail_start))?;
+        f.read_exact(&mut buf)?;
+        h.update(&buf);
+    }
+    Ok((h.finalize().to_hex().to_string(), size, m.mtime() * 1_000_000_000 + m.mtime_nsec()))
+}
+
+/// Full BLAKE3, read at no more than `rate` bytes/second (`0` = unlimited). Read-only.
+pub fn hash_file_throttled(path: &Path, rate: u64) -> io::Result<(String, u64)> {
+    use std::io::Read;
+    let mut f = File::open(path)?;
+    let mut h = blake3::Hasher::new();
+    let mut buf = vec![0u8; 1 << 20];
+    let started = std::time::Instant::now();
+    let mut n = 0u64;
+    loop {
+        let r = f.read(&mut buf)?;
+        if r == 0 {
+            break;
+        }
+        h.update(&buf[..r]);
+        n += r as u64;
+        if rate > 0 {
+            let due = std::time::Duration::from_secs_f64(n as f64 / rate as f64);
+            if let Some(wait) = due.checked_sub(started.elapsed()) {
+                std::thread::sleep(wait);
+            }
+        }
+    }
+    Ok((h.finalize().to_hex().to_string(), n))
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PlaceMethod {
     Reflink,

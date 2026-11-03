@@ -35,6 +35,7 @@ Pick four directories on persistent storage, ideally on the same filesystem so i
 | `MEDIA_DIR` | Content-addressed media store |
 | `ASSET_DIR` | Content-addressed image store (must not overlap ingest/media) |
 | `INGEST_DIR` | Drop folder watched for new media |
+| `EXTERNAL_ROOT` | Optional. Reference media in place on another disk: `ln -s /mnt/sdb1/Movies/x.mkv $INGEST_DIR/` (symlink target must be under this root; never copied, moved or written; may be read-only). See [docs/STORAGE.md](docs/STORAGE.md#referenced-media) |
 
 All other knobs are listed in [docs/STORAGE.md](docs/STORAGE.md).
 

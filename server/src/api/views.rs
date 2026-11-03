@@ -56,6 +56,10 @@ pub struct MediaFileDto {
     pub path: String,
     pub original_name: String,
     pub hash: String,
+    /// `store` or `external` (referenced in place).
+    pub location: String,
+    /// `full` or `pending` (`hash` is then `fp:<fingerprint>` until the background hash completes).
+    pub hash_state: String,
     pub added_at: i64,
     pub label: String,
     pub original: bool,
@@ -199,6 +203,8 @@ pub fn media_file_dto(f: &MediaFile) -> MediaFileDto {
         path: f.original_name.clone(),
         original_name: f.original_name.clone(),
         hash: f.hash.clone(),
+        location: f.location.clone(),
+        hash_state: f.hash_state.clone(),
         added_at: f.added_at,
         label: f.label.clone(),
         original: true,

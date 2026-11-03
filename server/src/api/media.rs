@@ -38,7 +38,8 @@ pub(super) async fn serve(path: PathBuf, mime: &str, req: Request) -> AppResult<
 
 async fn stream(State(st): State<Shared>, Path(file_id): Path<String>, req: Request) -> AppResult<Response> {
     let file = st.db.call(move |r| r.get_file(&file_id)).await?;
-    let mut resp = serve(st.ingest.store.abs(&file.store_path), &file.mime, req).await?;
+    let path = st.ingest.file_path(&file)?;
+    let mut resp = serve(path, &file.mime, req).await?;
     resp.headers_mut().insert(header::ACCEPT_RANGES, HeaderValue::from_static("bytes"));
     Ok(resp)
 }
@@ -69,7 +70,7 @@ async fn frame(
         return Err(AppError::bad(format!("t must be within 0..{max_t:.3}")));
     }
     let max_w = p.max_w.filter(|w| *w > 0);
-    let src = st.ingest.store.abs(&file.store_path);
+    let src = st.ingest.file_path(&file)?;
     if !src.is_file() {
         return Err(AppError::NotFound("stored file is missing".into()));
     }

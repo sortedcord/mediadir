@@ -132,3 +132,29 @@ pub fn migrate(conn: &mut Connection) -> Result<(), String> {
     println!("db: created schema v{SCHEMA_VERSION}");
     Ok(())
 }
+
+/// Referenced (external) media: extra `media_files` columns. Idempotent, run on every startup.
+/// `location` = `store` | `external`; `hash_state` = `full` | `pending` (pending: `hash` holds
+/// `fp:<fingerprint>` until the background task knows the full BLAKE3); `src_mtime` = mtime (ns)
+/// of an external file when it was fingerprinted.
+pub fn ensure_external(conn: &Connection) -> Result<(), String> {
+    let mut have = std::collections::HashSet::new();
+    {
+        let mut st = conn.prepare("PRAGMA table_info(media_files)").map_err(|e| e.to_string())?;
+        let rows = st.query_map([], |r| r.get::<_, String>(1)).map_err(|e| e.to_string())?;
+        for r in rows {
+            have.insert(r.map_err(|e| e.to_string())?);
+        }
+    }
+    for (col, ddl) in [
+        ("location", "ALTER TABLE media_files ADD COLUMN location TEXT NOT NULL DEFAULT 'store'"),
+        ("hash_state", "ALTER TABLE media_files ADD COLUMN hash_state TEXT NOT NULL DEFAULT 'full'"),
+        ("fingerprint", "ALTER TABLE media_files ADD COLUMN fingerprint TEXT"),
+        ("src_mtime", "ALTER TABLE media_files ADD COLUMN src_mtime INTEGER NOT NULL DEFAULT 0"),
+    ] {
+        if !have.contains(col) {
+            conn.execute_batch(ddl).map_err(|e| e.to_string())?;
+        }
+    }
+    conn.execute_batch("CREATE INDEX IF NOT EXISTS media_files_hash_state ON media_files(hash_state)").map_err(|e| e.to_string())
+}

@@ -21,6 +21,12 @@ pub struct StoredFile {
     pub ext: String,
     pub size: u64,
     pub probe: ProbeResult,
+    /// `store` or `external`.
+    pub location: String,
+    /// `full` or `pending`.
+    pub hash_state: String,
+    pub fingerprint: Option<String>,
+    pub src_mtime: i64,
 }
 
 #[derive(Debug, Clone)]
@@ -95,6 +101,10 @@ pub fn attach(repo: &Repo, mapping: &Mapping, f: &StoredFile, now: i64) -> AppRe
             audio: f.probe.audio.clone(),
             subtitles: f.probe.subtitles.clone(),
             added_at: now,
+            location: f.location.clone(),
+            hash_state: f.hash_state.clone(),
+            fingerprint: f.fingerprint.clone(),
+            src_mtime: f.src_mtime,
         };
         r.insert_file(&file)?;
         Ok(Attached { item_id: item.id, file_id: file.id, version_of_existing })

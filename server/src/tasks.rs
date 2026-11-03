@@ -20,7 +20,7 @@ const WEEK: u64 = 7 * 86400;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct Problem {
-    /// `missing` or `corrupt`
+    /// `missing`, `corrupt`, or `changed` (a referenced file's size/mtime changed; re-fingerprinted)
     pub problem: String,
     pub file_id: String,
     pub item_id: String,
@@ -150,6 +150,9 @@ impl Maintenance {
         let mut written = 0;
         for st in repo.all_file_states()? {
             let f = &st.file;
+            if f.is_external() {
+                continue; // never write next to (or about) referenced media
+            }
             let ch = chain(&f.item_id);
             let Some(item) = ch.first() else { continue };
             let changed = ch.iter().map(|i| i.updated_at).max().unwrap_or(0).max(f.added_at * 1000);
@@ -183,6 +186,15 @@ impl Maintenance {
         Ok(written)
     }
 
+    /// Where a file's bytes are (store blob or referenced target).
+    fn path_of(&self, f: &crate::model::MediaFile) -> PathBuf {
+        match (&self.cfg.external_root, f.is_external()) {
+            (Some(root), true) => root.join(&f.store_path),
+            (None, true) => PathBuf::from("<EXTERNAL_ROOT unset>").join(&f.store_path),
+            _ => self.store.abs(&f.store_path),
+        }
+    }
+
     /// Every stored file must exist with the right size; a rotating slice is re-hashed so the
     /// whole store is re-hashed about once a week.
     pub fn verify(&self) -> AppResult<Vec<Problem>> {
@@ -196,12 +208,38 @@ impl Maintenance {
             file_id: f.id.clone(),
             item_id: f.item_id.clone(),
             hash: f.hash.clone(),
-            path: self.store.abs(&f.store_path).to_string_lossy().to_string(),
+            path: self.path_of(f).to_string_lossy().to_string(),
             detail,
             detected_at: now(),
         };
         for st in &files {
             let f = &st.file;
+            if f.is_external() {
+                // referenced media: existence + size + mtime every run; never deleted or modified
+                match std::fs::metadata(self.path_of(f)) {
+                    Err(e) => problems.push(problem("missing", f, e.to_string())),
+                    Ok(m) => {
+                        use std::os::unix::fs::MetadataExt;
+                        let mtime = m.mtime() * 1_000_000_000 + m.mtime_nsec();
+                        if m.len() != f.size || mtime != f.src_mtime {
+                            let detail = format!("size/mtime changed (size {} -> {}); re-fingerprinted, hash pending", f.size, m.len());
+                            match crate::ingest::store::fingerprint(&self.path_of(f)) {
+                                Ok((fp, size, mt)) => {
+                                    if !repo.set_refingerprinted(&f.id, size, mt, &fp)? {
+                                        problems.push(problem("changed", f, format!("{detail}; new content duplicates another file")));
+                                    } else {
+                                        problems.push(problem("changed", f, detail));
+                                    }
+                                }
+                                Err(e) => problems.push(problem("missing", f, e.to_string())),
+                            }
+                        }
+                        continue;
+                    }
+                }
+                bad.insert(f.id.clone());
+                continue;
+            }
             match std::fs::metadata(self.store.abs(&f.store_path)) {
                 Err(e) => problems.push(problem("missing", f, e.to_string())),
                 Ok(m) if m.len() != f.size => problems.push(problem("corrupt", f, format!("size is {} bytes, expected {}", m.len(), f.size))),
@@ -216,7 +254,7 @@ impl Maintenance {
         for f in repo.files_due_for_rehash(slice as i64)? {
             rehashed.insert(f.id.clone());
             if !bad.contains(&f.id) {
-                match hash_file(&self.store.abs(&f.store_path)) {
+                match hash_file(&self.path_of(&f)) {
                     Ok((h, _)) if h == f.hash => {}
                     Ok((h, _)) => problems.push(problem("corrupt", &f, format!("content hash is {h}"))),
                     Err(e) => problems.push(problem("missing", &f, e.to_string())),

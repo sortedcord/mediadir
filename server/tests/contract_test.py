@@ -7,6 +7,9 @@ Needs a FRESH server (empty DATA_DIR / MEDIA_DIR / INGEST_DIR) on this machine, 
 short intervals so the periodic tasks run during the test:
   INGEST_SETTLE_SECS=1 INGEST_POLL_SECS=2 SIDECAR_INTERVAL=2 VERIFY_INTERVAL=3 BACKUP_INTERVAL=3
   ASSET_GC_INTERVAL=2 ASSET_GC_GRACE_SECS=6 ASSET_DIR=<fresh dir> ASSET_DEFAULT_WIDTH=1280
+Optional, for the referenced-media tests (skipped when unset): EXTERNAL_ROOT=<fresh dir>
+(must not overlap the other dirs; it may be read-only apart from what the test itself does to
+create/remove its fixtures there).
 
 The test builds unique copies of testmedia/ (remuxed with -c copy, so every file has its own
 hash), copies them into the server's INGEST_DIR, uploads more through the API and checks the
@@ -1032,6 +1035,94 @@ def main():
         wait_for(lambda: not [p for p in status()["problems"] if p["file_id"] == sf["id"]], what="problem cleared")
         assert status()["problems"] == []
     check("periodic tasks: sidecars (changed only), backups, integrity verify", t_tasks)
+
+    def t_external():
+        ext = status().get("external_root")
+        assert "pending_hashes" in status()
+        if not ext:
+            print("  ..   EXTERNAL_ROOT not set: referenced-media tests skipped")
+            return
+        ing = state["ingest_dir"]
+        os.makedirs(os.path.join(ext, "Movies"), exist_ok=True)
+        target = os.path.join(ext, "Movies", "Ref Film (2012).mkv")
+        make_video(target, 320, 180, 777)
+        os.chmod(target, 0o444)
+        st0 = os.stat(target)
+        link = os.path.join(ing, "Ref Film (2012).mkv")
+        os.symlink(target, link)
+        # rejected: outside the root, dangling
+        outside = os.path.join(work, "outside.mkv")
+        make_video(outside, 160, 90, 555)
+        os.symlink(outside, os.path.join(ing, "Outside Film (2011).mkv"))
+        os.symlink(os.path.join(ext, "nope.mkv"), os.path.join(ing, "Dangling Film (2010).mkv"))
+        before = len(get("/api/ingest?limit=1000"))
+        wait_idle(min_records=before + 3)
+        recs = {os.path.basename(r["source"]): r for r in get("/api/ingest?limit=1000") if r["source"].startswith(ing)}
+        r = recs["Ref Film (2012).mkv"]
+        assert r["state"] == "done" and r["placement"] == "reference", r
+        o = recs["Outside Film (2011).mkv"]
+        assert o["state"] == "failed" and "outside EXTERNAL_ROOT" in o["error"] and o["item_id"] is None, o
+        d = recs["Dangling Film (2010).mkv"]
+        assert d["state"] == "failed" and "dangling" in d["error"], d
+        assert not items(q="Outside Film")["items"] and not items(q="Dangling Film")["items"]
+        # catalogued in place
+        item = get(f"/api/items/{r['item_id']}")
+        assert item["kind"] == "movie" and item["title"] == "Ref Film" and len(item["files"]) == 1
+        f = item["files"][0]
+        assert f["location"] == "external" and f["hash_state"] in ("pending", "full"), f
+        assert f["original_name"] == "Ref Film (2012).mkv" and f["video"]["height"] == 180
+        assert os.path.islink(link), "the symlink stays"
+        assert not [n for n in os.listdir(state["media_dir"]) if n != ".staging" and os.path.exists(os.path.join(state["media_dir"], n, "x"))]
+        # stream + Range + frame work from the external path
+        raw = open(target, "rb").read()
+        st, h, body = req("GET", f["stream_url"], headers={"Range": "bytes=10-109"}, raw=True)
+        assert st == 206 and body == raw[10:110] and h["Content-Range"] == f"bytes 10-109/{len(raw)}", (st, dict(h))
+        st, h, body = req("GET", f["stream_url"], raw=True, expect=200)
+        assert body == raw
+        st, h, body = req("GET", f"/frame/{f['id']}?t=0.5", raw=True, expect=200)
+        assert body[:2] == b"\xff\xd8", "jpeg frame"
+        # lazy hash becomes the full hash; identity (file id) is unchanged
+        def full():
+            g = get(f"/api/items/{item['id']}")["files"][0]
+            return g if g["hash_state"] == "full" else None
+        g = wait_for(full, timeout=40, what="lazy full hash")
+        assert g["id"] == f["id"] and len(g["hash"]) == 64 and not g["hash"].startswith("fp:"), g
+        assert status()["pending_hashes"] == 0
+        assert f["hash_state"] == "full" or f["hash"].startswith("fp:"), f
+        # sidecars are never written next to referenced files
+        time.sleep(3)
+        assert sorted(os.listdir(os.path.join(ext, "Movies"))) == ["Ref Film (2012).mkv"]
+        # a changed file is flagged, re-fingerprinted (hash pending again) and hashed again
+        os.chmod(target, 0o644)
+        os.utime(target, (st0.st_atime, st0.st_mtime + 100))
+        os.chmod(target, 0o444)
+        probs = wait_for(lambda: [p for p in status()["problems"] if p["file_id"] == f["id"]], timeout=30, what="changed file reported")
+        assert probs[0]["problem"] == "changed" and probs[0]["item_id"] == item["id"], probs
+        wait_for(full, timeout=40, what="hash after change")
+        # delete: database rows only; target and symlink untouched
+        r2 = req("DELETE", f"/api/items/{item['id']}", expect=200)[1]
+        assert r2["ok"] is True and r2["files"] == 1, r2
+        assert req("GET", f"/api/items/{item['id']}")[0] == 404
+        assert os.path.isfile(target) and os.path.islink(link)
+        st1 = os.stat(target)
+        assert (st1.st_size, st1.st_mode, st1.st_ino) == (st0.st_size, st0.st_mode, st0.st_ino)
+        assert st1.st_mtime == st0.st_mtime + 100
+        assert open(target, "rb").read() == raw
+        # a removed target is reported as missing (never deleted from our side)
+        gone = os.path.join(ext, "Movies", "Gone Film (2013).mkv")
+        make_video(gone, 160, 90, 333)
+        glink = os.path.join(ing, "Gone Film (2013).mkv")
+        os.symlink(gone, glink)
+        gi = wait_for(lambda: [x for x in items(q="Gone Film")["items"]], timeout=40, what="gone film ingested")[0]
+        gf = get(f"/api/items/{gi['id']}")["files"][0]
+        assert gf["location"] == "external"
+        os.unlink(gone)
+        probs = wait_for(lambda: [p for p in status()["problems"] if p["file_id"] == gf["id"]], timeout=30, what="missing target reported")
+        assert probs[0]["problem"] == "missing", probs
+        assert req("GET", gf["stream_url"], raw=True)[0] == 404
+        req("DELETE", f"/api/items/{gi['id']}", expect=200)
+        wait_for(lambda: not [p for p in status()["problems"] if p["file_id"] == gf["id"]], what="problem cleared")
+    check("referenced media: symlink ingest, rejects, Range, frame, lazy hash, change/missing verify, delete keeps target", t_external)
 
     shutil.rmtree(work, ignore_errors=True)
     print(f"\n{PASSES} passed, {len(FAILS)} failed")

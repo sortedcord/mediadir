@@ -54,19 +54,25 @@ struct Status {
     media_dir: String,
     asset_dir: String,
     data_dir: String,
+    /// EXTERNAL_ROOT (null = referenced media is off).
+    external_root: Option<String>,
+    /// Referenced files whose full hash is still being computed in the background.
+    pending_hashes: i64,
     #[serde(flatten)]
     tasks: TaskStatus,
 }
 
 async fn status(State(st): State<Shared>) -> AppResult<Json<Status>> {
     let tasks = st.tasks.clone();
-    let task_status = st.db.call(move |r| tasks.status(r)).await?;
+    let (task_status, pending_hashes) = st.db.call(move |r| Ok((tasks.status(r)?, r.count_pending_hashes()?))).await?;
     Ok(Json(Status {
         queue: st.ingest.status(),
         ingest_dir: st.ingest.ingest_dir.to_string_lossy().to_string(),
         media_dir: st.ingest.store.root().to_string_lossy().to_string(),
         asset_dir: st.assets.store.root().to_string_lossy().to_string(),
         data_dir: st.data_dir.to_string_lossy().to_string(),
+        external_root: st.ingest.external_root.as_ref().map(|p| p.to_string_lossy().to_string()),
+        pending_hashes,
         tasks: task_status,
     }))
 }

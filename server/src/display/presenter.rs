@@ -192,6 +192,10 @@ mod tests {
             audio: vec![AudioStream { index: 1, codec: "opus".into(), channels: Some(2), language: Some("eng".into()), title: None }],
             subtitles: vec![],
             added_at: 0,
+            location: "store".into(),
+            hash_state: "full".into(),
+            fingerprint: None,
+            src_mtime: 0,
         }
     }
 

@@ -29,6 +29,9 @@ pub struct SubtitleStream {
     pub forced: bool,
 }
 
+pub const LOC_STORE: &str = "store";
+pub const LOC_EXTERNAL: &str = "external";
+
 /// One stored file (a version of an item). Its bytes live at `MEDIA_DIR/<store_path>`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MediaFile {
@@ -36,7 +39,7 @@ pub struct MediaFile {
     pub item_id: String,
     /// BLAKE3 of the content (hex): the file's identity.
     pub hash: String,
-    /// Relative to MEDIA_DIR: `<h[0..2]>/<h[2..4]>/<hash>.<ext>`.
+    /// Relative to MEDIA_DIR (`<h[0..2]>/<h[2..4]>/<hash>.<ext>`), or to EXTERNAL_ROOT when `location` is external.
     pub store_path: String,
     /// File name it arrived with (ingest dir or upload).
     pub original_name: String,
@@ -50,9 +53,21 @@ pub struct MediaFile {
     pub audio: Vec<AudioStream>,
     pub subtitles: Vec<SubtitleStream>,
     pub added_at: i64,
+    /// `store` (private blob under MEDIA_DIR) or `external` (referenced in place under EXTERNAL_ROOT).
+    pub location: String,
+    /// `full` (`hash` is the BLAKE3 of the content) or `pending` (`hash` is `fp:<fingerprint>`).
+    pub hash_state: String,
+    /// Quick fingerprint (external files only).
+    pub fingerprint: Option<String>,
+    /// mtime (ns) of an external file when last fingerprinted; 0 for store files.
+    pub src_mtime: i64,
 }
 
 impl MediaFile {
+    pub fn is_external(&self) -> bool {
+        self.location == LOC_EXTERNAL
+    }
+
     pub fn height(&self) -> u32 {
         self.video.as_ref().and_then(|v| v.height).unwrap_or(0)
     }

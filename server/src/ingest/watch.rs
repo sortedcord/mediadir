@@ -53,7 +53,7 @@ pub fn start(ing: Arc<Ingest>) {
         while let Some(p) = events.recv().await {
             let m = me.clone();
             // a directory moved/created in: its files produce no events of their own
-            let _ = tokio::task::spawn_blocking(move || if p.is_dir() { m.scan_dir(&p) } else { m.note(&p) }).await;
+            let _ = tokio::task::spawn_blocking(move || if p.symlink_metadata().map(|md| md.is_dir()).unwrap_or(false) { m.scan_dir(&p) } else { m.note(&p) }).await;
         }
     });
 
@@ -110,7 +110,7 @@ impl Ingest {
         }
     }
 
-    /// Walk a directory (recursively, skipping hidden entries and symlinks) and note every file.
+    /// Walk a directory (recursively, skipping hidden entries and symlinked directories; symlinked files are references) and note every file.
     pub fn scan_dir(&self, dir: &Path) {
         let mut stack = vec![dir.to_path_buf()];
         while let Some(d) = stack.pop() {
@@ -124,7 +124,7 @@ impl Ingest {
                 }
                 match e.file_type() {
                     Ok(t) if t.is_dir() => stack.push(e.path()),
-                    Ok(t) if t.is_file() => self.note(&e.path()),
+                    Ok(t) if t.is_file() || t.is_symlink() => self.note(&e.path()),
                     _ => {}
                 }
             }
