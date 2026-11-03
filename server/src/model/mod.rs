@@ -176,4 +176,7 @@ pub struct Credit {
 pub struct PersonRef {
     pub id: String,
     pub name: String,
+    /// Raw values of all image-type fields of the person (omitted when none).
+    #[serde(skip_serializing_if = "JsonMap::is_empty")]
+    pub images: JsonMap,
 }

@@ -257,7 +257,7 @@ mod tests {
         item.fields.insert("dancers".into(), json!(["p1", "missing"]));
         let files = vec![file(4320)];
         let mut people = HashMap::new();
-        people.insert("p1".to_string(), PersonRef { id: "p1".into(), name: "Nora Fatehi".into() });
+        people.insert("p1".to_string(), PersonRef { id: "p1".into(), name: "Nora Fatehi".into(), images: Default::default() });
         let ctx = PresentContext { item: &item, files: &files, parent: None, people: &people };
         let blocks = Presenter::new(&reg).detail(&ctx);
         let get = |k: &str| blocks.iter().find(|b| b.key == k);

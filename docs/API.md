@@ -50,9 +50,14 @@ Unknown JSON fields must be ignored by clients; optional fields may be absent or
   "duration": 178.4, "playable": true, "child_count": null,
   "aspect": "landscape",
   "added_at": 1793433022,
-  "card": [ DisplayBlock, … ]
+  "card": [ DisplayBlock, … ],
+  "images": { "<field_key>": {"hash": "…"} | [ {"hash": "…"}, … ] }
 }
 ```
+`images` (*v3*) = the raw stored values of ALL `image`-type fields of the item, regardless of placement (image
+fields default to `hidden`, so they are not in `card`). Omitted when the item has no image values. The server
+never chooses which image to show; clients pick a key (and fall back to parents) themselves. Present on every
+ItemSummary (lists, children, search, relation members, credits, playback, ...).
 `index` = episode/track/season number; `parent_index` = season/disc number.
 `card` = display blocks whose placement is `card_badge` or `card_meta`, already sorted by `order`.
 
@@ -93,11 +98,12 @@ the embedded streams only (`external` is always null; there is no `/subtitle` en
 ### Person / Credit
 ```json
 // Person (summary)
-{ "id": "…", "name": "Nora Fatehi", "sort_name": "Fatehi, Nora", "credit_count": 4 }
+{ "id": "…", "name": "Nora Fatehi", "sort_name": "Fatehi, Nora", "credit_count": 4,
+  "images": { "<field_key>": {"hash": "…"} | [ {"hash": "…"}, … ] } }   // images omitted when none
 // PersonDetail = Person + 
 { "bio": "…", "birth_date": "1992-02-06", "fields": {…}, "display": [DisplayBlock],
   "credits": [ { "id": "<credit id>", "role": "actor", "character": null, "item": ItemSummary } ] }
-// Credit (on ItemDetail)
+// Credit (on ItemDetail); `person` is a PersonRef `{id, name, images?}` (images as in Person)
 { "id": "…", "role": "actor", "character": "Herself", "order": 0,
   "person": { "id": "…", "name": "…" } }
 ```
@@ -225,7 +231,7 @@ Responses: `Cache-Control: public, max-age=31536000, immutable`, `ETag`, `304` o
 for assets. Assets nothing references are deleted by the server about 24 h after their last upload, so attach
 uploaded images promptly (re-uploading identical bytes is always safe and returns the existing asset).
 
-Removed in this version: `ItemSummary.images`, `GET /image/item/{id}/{slot}`, `Person.image`, `GET /image/person/{id}`,
+`ItemSummary.images` / `PersonSummary.images` / `PersonRef.images` are the *new* raw image-field maps (see ItemSummary); the old slot-based `ItemSummary.images` was removed. Also removed in this version: `GET /image/item/{id}/{slot}`, `Person.image`, `GET /image/person/{id}`,
 `PUT /api/people/{id}/image`, `Relation.props`, and the thumbnail generated at ingest.
 
 ## Relations (v3)
@@ -257,7 +263,7 @@ Implementation choices where the contract is open; all are additive / backward c
 - **Config**: see [STORAGE.md](STORAGE.md#configuration) (incl. `ASSET_DIR`, `ASSET_DEFAULT_WIDTH`, `ASSET_GC_*`) plus `BIND` (default `0.0.0.0:8096`), `FRAME_CACHE_MB`, `FRAME_THREADS`. `LIBRARIES`, `SCAN_INTERVAL`, `LEGACY_DATA_DIR` and `ARTIST_INFO_DIR` are gone. A `DATA_DIR` holding a v2 database is refused at startup (v3 needs a fresh one).
 - **v2.1 fields kept for shape compatibility** (clients that ignore unknown fields are unaffected):
   - `ItemSummary.index_end`: last episode of a multi-episode file (`S01E04-E05` gives `index` 4, `index_end` 5). Null otherwise.
-  - `ItemSummary.images` and `Person.image` are **gone** (see Images). `Person`/`PersonRef` no longer have `image`.
+  - The v2 slot `ItemSummary.images` and `Person.image` are **gone** (see Images; `images` is now a field-key map). `Person`/`PersonRef` no longer have `image`.
   - `ItemDetail.extras` is always `[]`; the `extra` item kind no longer exists.
   - `MediaFile.part` / `MediaFile.edition` and queue entries' `part` are always null (no stacking or editions; versions are just more files of the item, labelled by resolution/codec).
 

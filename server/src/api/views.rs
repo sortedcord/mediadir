@@ -4,7 +4,7 @@ use crate::db::{Member, Membership, Relation, Repo};
 use crate::display::{FieldRegistry, PresentContext, Presenter};
 use crate::error::AppResult;
 use crate::model::{
-    AudioStream, Credit, DisplayBlock, Item, ItemKind, JsonMap, MediaFile, Person, PersonRef, VideoStream,
+    AudioStream, Credit, DisplayBlock, FieldType, Item, ItemKind, JsonMap, MediaFile, Person, PersonRef, VideoStream,
 };
 use serde::Serialize;
 use std::collections::HashMap;
@@ -27,6 +27,9 @@ pub struct ItemSummary {
     pub aspect: &'static str,
     pub added_at: i64,
     pub card: Vec<DisplayBlock>,
+    /// Raw values of ALL image-type fields of the item, regardless of placement (omitted when none).
+    #[serde(skip_serializing_if = "JsonMap::is_empty")]
+    pub images: JsonMap,
 }
 
 #[derive(Serialize)]
@@ -138,6 +141,9 @@ pub struct PersonSummary {
     pub name: String,
     pub sort_name: Option<String>,
     pub credit_count: i64,
+    /// Raw values of all image-type fields of the person (omitted when none).
+    #[serde(skip_serializing_if = "JsonMap::is_empty")]
+    pub images: JsonMap,
 }
 
 #[derive(Serialize)]
@@ -173,9 +179,7 @@ pub struct Playback {
     pub queue: Vec<QueueEntry>,
 }
 
-pub fn person_ref(p: &Person) -> PersonRef {
-    PersonRef { id: p.id.clone(), name: p.name.clone() }
-}
+
 
 pub fn media_file_dto(f: &MediaFile) -> MediaFileDto {
     let subtitles = f
@@ -223,10 +227,25 @@ impl<'r, 'c> Views<'r, 'c> {
         Ok(Views { repo, registry: FieldRegistry::load(repo)? })
     }
 
+    /// The raw values of every image-type field in `values`, whatever its placement.
+    fn image_values(&self, values: &JsonMap) -> JsonMap {
+        values
+            .iter()
+            .filter(|(k, v)| {
+                !v.is_null() && self.registry.get(k).map_or(false, |d| d.field_type == FieldType::Image)
+            })
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect()
+    }
+
+    fn person_ref(&self, p: &Person) -> PersonRef {
+        PersonRef { id: p.id.clone(), name: p.name.clone(), images: self.image_values(&p.fields) }
+    }
+
     fn people_for(&self, values: &[&JsonMap]) -> AppResult<HashMap<String, PersonRef>> {
         let presenter = Presenter::new(&self.registry);
         let ids: Vec<String> = values.iter().flat_map(|m| presenter.referenced_people(m.iter())).collect();
-        Ok(self.repo.people_by_ids(&ids)?.iter().map(|p| (p.id.clone(), person_ref(p))).collect())
+        Ok(self.repo.people_by_ids(&ids)?.iter().map(|p| (p.id.clone(), self.person_ref(p))).collect())
     }
 
     fn merged_fields(item: &Item) -> JsonMap {
@@ -265,6 +284,7 @@ impl<'r, 'c> Views<'r, 'c> {
             aspect: item.kind.aspect(),
             added_at: item.added_at,
             card,
+            images: self.image_values(&merged),
         })
     }
 
@@ -299,7 +319,7 @@ impl<'r, 'c> Views<'r, 'c> {
                     character: c.character.clone(),
                     order: c.order,
                     source: c.source.as_str(),
-                    person: person_ref(p),
+                    person: self.person_ref(p),
                 })
             })
             .collect())
@@ -385,6 +405,7 @@ impl<'r, 'c> Views<'r, 'c> {
             name: p.name.clone(),
             sort_name: p.sort_name.clone(),
             credit_count: self.repo.credit_count(&p.id)?,
+            images: self.image_values(&p.fields),
         })
     }
 

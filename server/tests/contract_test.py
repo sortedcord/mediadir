@@ -105,7 +105,7 @@ def check_block(b):
 def check_summary(s):
     has(s, "id", "kind", "library_id", "parent_id", "title", "subtitle", "year", "index", "parent_index", "index_end",
         "duration", "playable", "child_count", "aspect", "added_at", "card")
-    assert "images" not in s, "slot images are gone"
+    assert "images" not in s or (isinstance(s["images"], dict) and s["images"]), "images map is omitted when empty"
     assert is_id(s["id"]) and is_id(s["library_id"]), (s["id"], s["library_id"])
     assert s["kind"] in ITEM_KINDS
     assert s["playable"] == (s["kind"] in PLAYABLE)
@@ -145,7 +145,7 @@ def check_detail(d):
     for c in d["credits"]:
         has(c, "id", "role", "character", "order", "person")
         has(c["person"], "id", "name")
-        assert "image" not in c["person"]
+        assert "image" not in c["person"] and ("images" not in c["person"] or c["person"]["images"])
     for c in d["children"]:
         check_summary(c)
     for b in d["display"]:
@@ -358,7 +358,7 @@ def main():
         assert sorted(f["path"] for f in bb["files"]) == ["Big Buck Test (2008) - 270p.mkv", "Big Buck Test (2008)-trailer.mp4", "Big Buck Test (2008).mp4"]
         assert [f["video"]["height"] for f in bb["files"]] == [360, 270, 240]
         assert bb["files"][1]["label"] == "270p · H264" and bb["files"][1]["path"] == "Big Buck Test (2008) - 270p.mkv"
-        assert "images" not in bb
+        assert "images" not in bb, "no image fields yet -> no images map"
         keys = {b["key"]: b for b in bb["display"]}
         for k in ("year", "resolution", "duration", "video_codec", "size"):
             assert k in keys, (k, sorted(keys))
@@ -924,11 +924,21 @@ def main():
         det = req("PUT", f"/api/items/{item['id']}/fields/ct_poster", {"value": {"hash": a["hash"]}}, expect=200)[1]
         assert det["fields"]["ct_poster"] == {"hash": a["hash"]}
         assert not any(b["key"] == "ct_poster" for b in det["display"]), "hidden by default"
+        # ...but every summary carries the raw image values regardless of placement
+        assert det["images"] == {"ct_poster": {"hash": a["hash"]}}, det.get("images")
+        lst = [i for i in items(top="false", limit=500)["items"] if i["id"] == item["id"]]
+        assert lst and lst[0]["images"] == {"ct_poster": {"hash": a["hash"]}}, "list summary"
+        other = next(i for i in items(top="false", limit=500)["items"] if i["id"] != item["id"])
+        assert "images" not in other, "items without image values omit the map"
+        sr = get("/api/search?q=" + urllib.parse.quote(item["title"]))
+        assert any(i["id"] == item["id"] and i["images"]["ct_poster"] == {"hash": a["hash"]} for i in sr["items"]), "search summary"
         # ordered list, on a person too (uppercase hashes are normalized, extra keys dropped)
         pv = [{"hash": pa["hash"].upper(), "x": 1}, {"hash": a["hash"]}]
         p = req("PUT", f"/api/people/{pid}/fields/ct_photos", {"value": pv}, expect=200)[1]
         assert p["fields"]["ct_photos"] == [{"hash": pa["hash"]}, {"hash": a["hash"]}], p["fields"]
-        assert "image" not in p
+        assert "image" not in p and p["images"] == {"ct_photos": [{"hash": pa["hash"]}, {"hash": a["hash"]}]}, p.get("images")
+        pl = [x for x in get("/api/people?q=Asset")["people"] if x["id"] == pid]
+        assert pl and pl[0]["images"] == p["images"], "person summary in list"
         # invalid values
         for bad in ({"hash": "0" * 64}, [{"hash": "0" * 64}], {"hash": "zz"}, "deadbeef", a["hash"], [], 5, {"x": 1}, [a["hash"]]):
             assert req("PUT", f"/api/items/{item['id']}/fields/ct_poster", {"value": bad})[0] == 400, bad
