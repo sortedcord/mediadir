@@ -44,6 +44,16 @@ fun SettingsScreen(nav: Nav) {
     val ctx = LocalContext.current
     val scroll = rememberScrollState()
     OnTabReselect(Routes.SETTINGS) { scroll.animateScrollTo(0) }
+    var jobsSummary by remember { mutableStateOf<String?>(null) }
+    LaunchedEffect(Unit) {
+        while (true) {
+            runCatching { Graph.repo.jobStats() }.onSuccess { st ->
+                val parts = listOf("running", "queued", "paused", "failed").mapNotNull { k -> st.byState[k]?.takeIf { it > 0 }?.let { "$it $k" } }
+                jobsSummary = if (parts.isEmpty()) "Idle" else parts.joinToString(" · ")
+            }
+            kotlinx.coroutines.delay(5000)
+        }
+    }
     val quality = qualities.firstOrNull { it.first == s.quality }?.second ?: "Auto"
     SettingsPage("Settings", null, scroll) {
         Spacer(Modifier.height(8.dp))
@@ -58,6 +68,8 @@ fun SettingsScreen(nav: Nav) {
             SettingsRow("Library & metadata", "Custom fields and how they're shown", Icons.Default.Tune, nav::fieldSettings, chevron = true)
             SettingsDivider()
             SettingsRow("Ingest & storage", "Upload media, ingest queue, backups, integrity", Icons.Default.Storage, nav::ingest, chevron = true)
+            SettingsDivider()
+            SettingsRow("Jobs & schedules", jobsSummary ?: "Background work, progress and schedules", Icons.Default.Schedule, nav::jobs, chevron = true)
             SettingsDivider()
             SettingsRow("About", "Version ${appVersion(ctx)}", Icons.Default.Info, { nav.settingsPage("about") }, chevron = true)
         }

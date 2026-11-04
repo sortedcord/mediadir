@@ -41,6 +41,15 @@ interface MediaRepository {
     suspend fun pollIngest()
     suspend fun relation(id: String): RelationDetail
     suspend fun uploadAsset(open: () -> java.io.InputStream): UploadedAsset
+    suspend fun jobs(state: String? = null, type: String? = null, limit: Int = 200): Pair<Int, List<JobInfo>>
+    suspend fun job(id: String): JobInfo
+    suspend fun createJob(type: String): JobInfo
+    suspend fun jobAction(id: String, action: String): JobInfo
+    suspend fun deleteJob(id: String)
+    suspend fun jobStats(): JobStats
+    suspend fun schedules(): List<ScheduleInfo>
+    suspend fun updateSchedule(id: String, changes: Map<String, Any?>): ScheduleInfo
+    suspend fun runSchedule(id: String): JobInfo
 }
 
 class HttpMediaRepository(private val settings: Settings) : MediaRepository {
@@ -149,6 +158,24 @@ class HttpMediaRepository(private val settings: Settings) : MediaRepository {
             with(Json) { UploadedAsset(j.optString("hash"), j.str("mime"), j.int("width"), j.int("height"), j.long("size")) }
         } finally { c.disconnect() }
     }
+    override suspend fun jobs(state: String?, type: String?, limit: Int): Pair<Int, List<JobInfo>> {
+        val o = obj(call("GET", "/api/jobs" + query("state" to state, "type" to type, "limit" to limit)))
+        return o.optInt("total") to o.optJSONArray("jobs").let { a -> (0 until (a?.length() ?: 0)).mapNotNull { a!!.optJSONObject(it) }.map(::parseJob) }
+    }
+    override suspend fun job(id: String) = parseJob(obj(call("GET", "/api/jobs/$id")))
+    override suspend fun createJob(type: String) = parseJob(obj(call("POST", "/api/jobs", JSONObject().put("type", type))))
+    override suspend fun jobAction(id: String, action: String) = parseJob(obj(call("POST", "/api/jobs/$id/$action", JSONObject())))
+    override suspend fun deleteJob(id: String) { call("DELETE", "/api/jobs/$id") }
+    override suspend fun jobStats(): JobStats {
+        val o = obj(call("GET", "/api/jobs/stats"))
+        fun counts(j: JSONObject?): Map<String, Int> = j?.keys()?.asSequence()?.associateWith { j.optInt(it) } ?: emptyMap()
+        val bt = o.optJSONObject("by_type")
+        return JobStats(counts(o.optJSONObject("by_state")), bt?.keys()?.asSequence()?.associateWith { counts(bt.optJSONObject(it)) } ?: emptyMap())
+    }
+    override suspend fun schedules() = (call("GET", "/api/schedules") as? JSONArray ?: JSONArray()).let { a -> (0 until a.length()).mapNotNull { a.optJSONObject(it) }.map(::parseSchedule) }
+    override suspend fun updateSchedule(id: String, changes: Map<String, Any?>) = parseSchedule(obj(call("PUT", "/api/schedules/$id", mapJson(changes))))
+    override suspend fun runSchedule(id: String) = parseJob(obj(call("POST", "/api/schedules/$id/run", JSONObject())))
+
     override suspend fun deleteItem(id: String) { call("DELETE", "/api/items/$id") }
     override suspend fun deleteFile(id: String) { call("DELETE", "/api/files/$id") }
 
