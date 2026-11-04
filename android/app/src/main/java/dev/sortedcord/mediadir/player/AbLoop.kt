@@ -30,7 +30,7 @@ import kotlin.math.abs
 @OptIn(UnstableApi::class)
 class AbLoop(
     private val contentFrame: ViewGroup,
-    private val newPlayer: () -> ExoPlayer,
+    private val newPlayer: (Boolean) -> ExoPlayer,
     private val main: () -> ExoPlayer?,
     private val currentItem: () -> MediaItem?,
     private val onSwap: () -> Unit,
@@ -60,7 +60,7 @@ class AbLoop(
             FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
         texture = tv
         val item = currentItem() ?: return
-        shadow = newPlayer().apply {
+        shadow = newPlayer(true).apply {
             volume = 0f
             setSeekParameters(androidx.media3.exoplayer.SeekParameters.EXACT)
             setVideoTextureView(tv)
