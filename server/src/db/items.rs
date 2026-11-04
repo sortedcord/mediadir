@@ -223,6 +223,47 @@ impl Repo<'_> {
         Ok(out)
     }
 
+    /// Merge `sources` into `target` in one transaction: every file becomes a version of the
+    /// target, relation memberships move over (the target's own membership wins), ingest records
+    /// are repointed, then the source rows are deleted. Nothing in the store is touched.
+    pub fn merge_items(&self, target_id: &str, source_ids: &[String]) -> AppResult<()> {
+        if source_ids.is_empty() {
+            return Err(AppError::bad("sources must not be empty"));
+        }
+        let mut seen = std::collections::HashSet::new();
+        for s in source_ids {
+            if s == target_id {
+                return Err(AppError::bad("an item cannot be merged into itself"));
+            }
+            if !seen.insert(s.as_str()) {
+                return Err(AppError::bad("sources must be distinct"));
+            }
+        }
+        self.tx(|r| {
+            let target = r.get_item(target_id)?;
+            let mut sources = vec![];
+            for s in source_ids {
+                sources.push(r.get_item(s)?);
+            }
+            for i in std::iter::once(&target).chain(sources.iter()) {
+                if !i.kind.playable() || r.child_count(&i.id)? > 0 {
+                    return Err(AppError::bad(format!("'{}' is not a playable item and cannot be merged", i.title)));
+                }
+            }
+            let mut removed = Removed::default();
+            for s in &sources {
+                r.conn.execute("UPDATE media_files SET item_id = ?1 WHERE item_id = ?2", [target_id, &s.id])?;
+                r.conn.execute("UPDATE ingests SET item_id = ?1 WHERE item_id = ?2", [target_id, &s.id])?;
+                r.conn.execute("UPDATE OR IGNORE relation_members SET item_id = ?1 WHERE item_id = ?2", [target_id, &s.id])?;
+                // leftovers (target already a member) and credits go with the delete triggers
+                r.conn.execute("DELETE FROM items WHERE id = ?1", [&s.id])?;
+                r.prune_empty_ancestors(s.parent_id.as_deref(), &mut removed)?;
+            }
+            r.conn.execute("UPDATE items SET updated_at = ?2 WHERE id = ?1", params![target_id, now_ms()])?;
+            Ok(())
+        })
+    }
+
     /// Remove containers (season, show, artist...) that no longer have children.
     pub fn prune_empty_ancestors(&self, parent: Option<&str>, out: &mut Removed) -> AppResult<()> {
         let mut cur = parent.map(String::from);

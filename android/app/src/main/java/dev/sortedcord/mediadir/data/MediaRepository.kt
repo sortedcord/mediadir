@@ -37,6 +37,7 @@ interface MediaRepository {
     suspend fun ingests(): List<IngestRecord>
     suspend fun upload(name: String, open: () -> java.io.InputStream): IngestRecord
     suspend fun deleteItem(id: String)
+    suspend fun mergeItems(targetId: String, sourceIds: List<String>): ItemDetail
     suspend fun deleteFile(id: String)
     suspend fun pollIngest()
     suspend fun relation(id: String): RelationDetail
@@ -177,6 +178,8 @@ class HttpMediaRepository(private val settings: Settings) : MediaRepository {
     override suspend fun runSchedule(id: String) = parseJob(obj(call("POST", "/api/schedules/$id/run", JSONObject())))
 
     override suspend fun deleteItem(id: String) { call("DELETE", "/api/items/$id") }
+    override suspend fun mergeItems(targetId: String, sourceIds: List<String>) =
+        Json.detail(obj(call("POST", "/api/items/$targetId/merge", JSONObject().put("sources", JSONArray(sourceIds)))))
     override suspend fun deleteFile(id: String) { call("DELETE", "/api/files/$id") }
 
     // Stream once: retrying a partially completed upload could hide its real outcome.

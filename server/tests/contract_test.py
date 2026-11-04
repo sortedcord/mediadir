@@ -1543,6 +1543,48 @@ def main():
         req("DELETE", f"/api/items/{it['id']}", expect=200)
         assert os.path.isfile(big)
     check("jobs: cancel a long (hash) job, pause it mid-file, resume to completion", t_long_job)
+    def t_merge():
+        mk = lambda n, w, h, f: (make_video(os.path.join(work, n), w, h, f), os.path.join(work, n))[1]
+        ids = []
+        for name, w, h, f in [("Merge Alpha (2030).mkv", 640, 360, 911), ("Merge Beta (2031).mkv", 320, 180, 912),
+                              ("Merge Gamma (2032).mkv", 480, 270, 913)]:
+            s, rec = upload(mk("m-" + name, w, h, f), name)
+            assert s == 201, rec
+            ids.append(rec["item_id"])
+        ta, sb, sc = ids
+        fb = get(f"/api/items/{sb}")["files"][0]
+        fc = get(f"/api/items/{sc}")["files"][0]
+        rel = req("POST", "/api/relations", {"type": "collection", "members": [{"item_id": ta}, {"item_id": sb}]}, expect=201)[1]
+        rel2 = req("POST", "/api/relations", {"type": "collection", "members": [{"item_id": sb}, {"item_id": sc}]}, expect=201)[1]
+        # validation
+        assert req("POST", f"/api/items/{ta}/merge", {"sources": []})[0] == 400
+        assert req("POST", f"/api/items/{ta}/merge", {"sources": [ta]})[0] == 400
+        assert req("POST", f"/api/items/{ta}/merge", {"sources": [sb, sb]})[0] == 400
+        assert req("POST", f"/api/items/{ta}/merge", {"sources": ["0000000000000000"]})[0] == 404
+        assert req("POST", "/api/items/0000000000000000/merge", {"sources": [sb]})[0] == 404
+        container = state["artist"]["id"]
+        assert req("POST", f"/api/items/{ta}/merge", {"sources": [container]})[0] == 400
+        assert req("POST", f"/api/items/{container}/merge", {"sources": [ta]})[0] == 400
+        assert len(get(f"/api/items/{ta}")["files"]) == 1 and get(f"/api/items/{sb}")["title"] == "Merge Beta"
+        # merge
+        d = req("POST", f"/api/items/{ta}/merge", {"sources": [sb, sc]}, expect=200)[1]
+        assert d["id"] == ta and d["title"] == "Merge Alpha", d["title"]
+        assert sorted(x["video"]["height"] for x in d["files"]) == [180, 270, 360], d["files"]
+        assert {fb["id"], fc["id"]} <= {x["id"] for x in d["files"]}
+        assert req("GET", f"/api/items/{sb}")[0] == 404 and req("GET", f"/api/items/{sc}")[0] == 404
+        for f in (fb, fc):
+            assert os.path.exists(blob_path(state["media_dir"], f)), "merge must keep the stored files"
+            st, _, body = req("GET", f["stream_url"], headers={"Range": "bytes=0-99"}, raw=True)
+            assert st == 206 and len(body) == 100
+        # relations moved / deduped
+        assert get(f"/api/relations/{rel['id']}")["member_count"] == 1
+        r2 = get(f"/api/relations/{rel2['id']}")
+        assert [m["item_id"] for m in r2["members"]] == [ta], r2
+        assert {r["id"] for r in get(f"/api/items/{ta}/relations")} == {rel["id"], rel2["id"]}
+        req("DELETE", f"/api/relations/{rel['id']}", expect=204)
+        req("DELETE", f"/api/relations/{rel2['id']}", expect=204)
+        assert req("POST", f"/api/items/{ta}/merge", {"sources": [sb]})[0] == 404, "sources are gone"
+    check("items: POST /api/items/{id}/merge", t_merge)
 
     shutil.rmtree(work, ignore_errors=True)
     print(f"\n{PASSES} passed, {len(FAILS)} failed")
