@@ -179,6 +179,7 @@ class PlayerActivity : ComponentActivity(), GestureLayer.Listener {
         view = TouchPlayerView(this) { root.backgroundDown = true }.apply {
             setShowSubtitleButton(true)
             setShowNextButton(true); setShowPreviousButton(true)
+            setShowRewindButton(false); setShowFastForwardButton(false)
             setFullscreenButtonClickListener { if (zoomEnabled()) zoom.toggle() }
             setBackgroundColor(Color.BLACK)
             keepScreenOn = true
