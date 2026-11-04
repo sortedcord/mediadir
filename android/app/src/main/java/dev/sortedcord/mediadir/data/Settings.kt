@@ -21,6 +21,11 @@ class Settings(ctx: Context) {
         get() = prefs.getBoolean("hq_pause_frame", true)
         set(v) = prefs.edit().putBoolean("hq_pause_frame", v).apply()
 
+    /** Format of the HQ pause frame: jpg (default, fastest), webp, or png (lossless, "raw"). */
+    var hqFrameFormat: String
+        get() = prefs.getString("hq_frame_format", "jpg").takeIf { it in setOf("jpg", "webp", "png") } ?: "jpg"
+        set(v) = prefs.edit().putString("hq_frame_format", v).apply()
+
     /** How long playback must stay paused before the HQ frame is fetched. */
     var hqPauseDelayMs: Int
         get() = prefs.getInt("hq_pause_delay_ms", 1200)

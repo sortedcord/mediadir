@@ -129,6 +129,7 @@ fun PlaybackSettingsScreen(nav: Nav) {
     val s = Graph.settings
     var quality by remember { mutableIntStateOf(s.quality) }
     var hq by remember { mutableStateOf(s.hqPauseFrame) }
+    var hqFmt by remember { mutableStateOf(s.hqFrameFormat) }
     var hqDelay by remember { mutableIntStateOf(s.hqPauseDelayMs) }
     var loop by remember { mutableStateOf(s.loopVideo) }
     SettingsPage("Playback", nav) {
@@ -146,6 +147,16 @@ fun PlaybackSettingsScreen(nav: Nav) {
             SettingsDivider()
             SettingsSwitchRow("High-quality pause frame", "When paused, replace the frame with the highest-quality version from the server (great for zooming)", hq, { hq = it; s.hqPauseFrame = it })
             if (hq) {
+                SettingsDivider()
+                SettingsBlock {
+                    Text("Pause frame format", color = Muted, style = MaterialTheme.typography.bodySmall)
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        listOf("jpg" to "JPEG", "webp" to "WebP", "png" to "Raw (PNG)").forEach { (f, l) ->
+                            FilterChip(selected = hqFmt == f, onClick = { hqFmt = f; s.hqFrameFormat = f }, label = { Text(l) })
+                        }
+                    }
+                    Text("JPEG is fastest. Raw is a lossless PNG: larger and slower to load.", color = Muted, style = MaterialTheme.typography.bodySmall)
+                }
                 SettingsDivider()
                 SettingsBlock {
                     Text("Fetch after pausing for", color = Muted, style = MaterialTheme.typography.bodySmall)

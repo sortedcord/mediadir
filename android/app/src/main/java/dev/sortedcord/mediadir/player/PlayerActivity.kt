@@ -382,7 +382,7 @@ class PlayerActivity : ComponentActivity(), GestureLayer.Listener {
         if (pixels(best) <= pixels(cur)) return
         val posMs = shownFrameMs(p)
         android.util.Log.i("HqFrame", "request t=${posMs}ms currentPosition=${p.currentPosition}ms diff=${posMs - p.currentPosition}ms rawPts=$lastFramePtsUs offset=$ptsOffsetUs")
-        val url = settings.url("/frame/${best.id}") + "?fmt=jpg&t=" + "%.3f".format(java.util.Locale.US, posMs / 1000.0)
+        val url = settings.url("/frame/${best.id}") + "?fmt=${settings.hqFrameFormat}&t=" + "%.3f".format(java.util.Locale.US, posMs / 1000.0)
         hqChip.start()
         hqJob = lifecycleScope.launch {
             val file = runCatching {
