@@ -63,10 +63,10 @@ struct Status {
 }
 
 async fn status(State(st): State<Shared>) -> AppResult<Json<Status>> {
-    let tasks = st.tasks.clone();
-    let (task_status, pending_hashes) = st.db.call(move |r| Ok((tasks.status(r)?, r.count_pending_hashes()?))).await?;
+    let (tasks, ing) = (st.tasks.clone(), st.ingest.clone());
+    let (task_status, pending_hashes, queue) = st.db.call(move |r| Ok((tasks.status(r)?, r.count_pending_hashes()?, ing.status()))).await?;
     Ok(Json(Status {
-        queue: st.ingest.status(),
+        queue,
         ingest_dir: st.ingest.ingest_dir.to_string_lossy().to_string(),
         media_dir: st.ingest.store.root().to_string_lossy().to_string(),
         asset_dir: st.assets.store.root().to_string_lossy().to_string(),

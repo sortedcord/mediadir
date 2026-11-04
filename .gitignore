@@ -18,3 +18,5 @@ android/local.properties
 __pycache__/
 .venv/
 mcp/*.egg-info/
+.claude/
+server/.ct-*/

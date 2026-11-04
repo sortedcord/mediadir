@@ -1372,6 +1372,178 @@ def main():
         assert len(get("/api/ingest?limit=1000")) > n_before
     check("ingest retry: POST /api/ingest/{id}/retry and /api/ingest/retry-failed", t_retry)
 
+    # ------------------------------------------------------------------ jobs (docs/API.md "Jobs")
+    def job(jid):
+        return get(f"/api/jobs/{jid}")
+
+    def wait_job(jid, states, timeout=60):
+        return wait_for(lambda: (lambda j: j if j["state"] in states else None)(job(jid)), timeout=timeout,
+                        what=f"job {jid} -> {states}")
+
+    def t_jobs_crud():
+        j = req("POST", "/api/jobs", {"type": "sidecars"}, expect=201)[1]
+        has(j, "id", "type", "params", "state", "priority", "progress", "attempts", "max_attempts", "error", "result",
+            "created_at", "run_at", "started_at", "finished_at", "parent_id", "schedule_id")
+        assert j["type"] == "sidecars" and j["state"] in ("queued", "running", "done") and j["params"] == {}, j
+        d = wait_job(j["id"], ("done",))
+        assert d["finished_at"] and d["started_at"] and d["attempts"] == 1 and "written" in d["result"], d
+        assert isinstance(d["logs"], list) and d["logs"], d
+        has(d["logs"][0], "ts", "level", "msg")
+        lst = get("/api/jobs?type=sidecars&state=done&limit=1000")
+        has(lst, "jobs", "total", "limit", "offset")
+        assert any(x["id"] == j["id"] for x in lst["jobs"]) and all(x["type"] == "sidecars" for x in lst["jobs"])
+        page = get("/api/jobs?limit=1&offset=1")
+        assert len(page["jobs"]) == 1 and page["offset"] == 1 and page["total"] >= 2
+        # validation
+        assert req("POST", "/api/jobs", {"type": "nope"})[0] == 400
+        assert req("POST", "/api/jobs", {"type": "backup", "params": {"x": 1}})[0] == 400
+        assert req("POST", "/api/jobs", {"type": "ingest", "params": {"path": "/etc/passwd"}})[0] == 400
+        assert req("POST", "/api/jobs", {"type": "asset_gc", "params": {"grace_secs": "soon"}})[0] == 400
+        assert req("GET", "/api/jobs?state=bogus")[0] == 400
+        assert req("GET", "/api/jobs?type=bogus")[0] == 400
+        assert req("GET", "/api/jobs/ffffffffffffffff")[0] == 404
+        # a delayed job waits for run_at; cancel it, retry it, delete it
+        later = req("POST", "/api/jobs", {"type": "backup", "run_at": int(time.time()) + 3600, "priority": 7}, expect=201)[1]
+        assert later["priority"] == 7 and later["state"] == "queued"
+        assert req("DELETE", f"/api/jobs/{later['id']}")[0] == 409, "unfinished jobs cannot be deleted"
+        assert req("POST", f"/api/jobs/{later['id']}/pause", expect=200)[1]["state"] == "paused"
+        assert req("POST", f"/api/jobs/{later['id']}/resume", expect=200)[1]["state"] == "queued"
+        assert req("POST", f"/api/jobs/{later['id']}/cancel", expect=200)[1]["state"] == "cancelled"
+        assert req("POST", f"/api/jobs/{later['id']}/cancel")[0] == 409
+        r = req("POST", f"/api/jobs/{later['id']}/retry", expect=200)[1]
+        assert r["state"] == "queued" and r["attempts"] == 0
+        req("POST", f"/api/jobs/{later['id']}/cancel", expect=200)
+        wait_job(later["id"], ("cancelled", "done"))
+        req("DELETE", f"/api/jobs/{later['id']}", expect=200)
+        assert req("GET", f"/api/jobs/{later['id']}")[0] == 404
+        assert req("POST", f"/api/jobs/{d['id']}/retry")[0] == 409, "done jobs are not retried"
+        st = get("/api/jobs/stats")
+        has(st, "by_state", "by_type", "workers")
+        has(st["workers"], "max", "busy", "utilization", "by_type")
+        assert st["by_state"]["done"] >= 1 and st["workers"]["by_type"]["ingest"]["limit"] >= 1, st
+        assert set(st["by_type"]) >= {"ingest", "hash", "verify", "sidecars", "backup", "asset_gc", "analytics_snapshot", "analytics_rollup"}
+    check("jobs: create / list / get / validation / pause+resume+cancel+retry+delete of a queued job / stats", t_jobs_crud)
+
+    def t_jobs_ingest_link():
+        recs = get("/api/ingest?limit=1000")
+        r = [x for x in recs if x["origin"] == "ingest" and x["state"] == "done"][0]
+        assert r["job_id"], r
+        j = job(r["job_id"])
+        assert j["type"] == "ingest" and j["state"] == "done" and j["result"]["record_id"] == r["id"], j
+        assert j["params"]["path"] == r["source"]
+        u = [x for x in recs if x["origin"] == "upload" and x["state"] == "done"][0]
+        assert u["job_id"] and job(u["job_id"])["params"]["upload"] == u["id"]
+        s = status()
+        has(s, "queue", "settling", "active", "paused", "pending_hashes", "last_sidecar_sync", "last_verify", "last_backup", "last_asset_gc")
+    check("jobs: ingest records link to their ingest job; status counts come from jobs", t_jobs_ingest_link)
+
+    def t_schedules():
+        ss = get("/api/schedules")
+        ids = {x["id"] for x in ss}
+        assert ids >= {"sidecars", "verify", "backup", "asset_gc", "hash", "analytics_snapshot", "analytics_rollup"}, ids
+        for x in ss:
+            has(x, "id", "type", "params", "interval_secs", "cron", "enabled", "next_run", "last_run", "last_job_id")
+        sc = [x for x in ss if x["id"] == "sidecars"][0]
+        assert sc["interval_secs"] == 2 and sc["enabled"] and sc["last_job_id"], sc  # seeded from SIDECAR_INTERVAL
+        e = req("PUT", "/api/schedules/sidecars", {"interval_secs": 3600}, expect=200)[1]
+        assert abs(e["next_run"] - (time.time() + 3600)) < 5, e
+        e = req("PUT", "/api/schedules/sidecars", {"cron": "*/5 * * * *"}, expect=200)[1]
+        assert e["cron"] == "*/5 * * * *" and e["next_run"] % 300 == 0 and e["next_run"] > time.time(), e
+        assert req("PUT", "/api/schedules/sidecars", {"cron": "61 * * * *"})[0] == 400
+        assert req("PUT", "/api/schedules/sidecars", {"interval_secs": 0})[0] == 400
+        assert req("PUT", "/api/schedules/sidecars", {"bogus": 1})[0] == 400
+        assert req("PUT", "/api/schedules/nope", {"enabled": False})[0] == 404
+        # takes effect without a restart: no new scheduled sidecars job for a while
+        last = get("/api/schedules/sidecars")["last_job_id"]
+        time.sleep(3)
+        assert get("/api/schedules/sidecars")["last_job_id"] == last
+        # run now
+        j = req("POST", "/api/schedules/sidecars/run", expect=201)[1]
+        assert j["schedule_id"] == "sidecars" and j["type"] == "sidecars"
+        wait_job(j["id"], ("done",))
+        s = get("/api/schedules/sidecars")
+        assert s["last_job_id"] == j["id"] and s["last_run"], s
+        # back to an interval, disabled
+        e = req("PUT", "/api/schedules/sidecars", {"cron": "", "interval_secs": 2, "enabled": False}, expect=200)[1]
+        assert e["cron"] is None and not e["enabled"]
+        req("PUT", "/api/schedules/sidecars", {"enabled": True}, expect=200)
+    check("schedules: list, edit interval/cron/enabled (validated, live), run now", t_schedules)
+
+    def t_sse():
+        import http.client, threading
+        u = urllib.parse.urlparse(BASE)
+        conn = http.client.HTTPConnection(u.hostname, u.port, timeout=30)
+        conn.request("GET", "/api/jobs/events?type=sidecars")
+        resp = conn.getresponse()
+        assert resp.status == 200 and resp.getheader("Content-Type").startswith("text/event-stream")
+        events = []
+        def reader():
+            ev = None
+            try:
+                while True:
+                    line = resp.readline()
+                    if not line:
+                        return
+                    line = line.decode().rstrip("\n")
+                    if line.startswith("event:"):
+                        ev = line[6:].strip()
+                    elif line.startswith("data:") and ev == "job":
+                        events.append(json.loads(line[5:]))
+            except Exception:
+                return
+        th = threading.Thread(target=reader, daemon=True)
+        th.start()
+        time.sleep(0.5)
+        j = req("POST", "/api/jobs", {"type": "sidecars"}, expect=201)[1]
+        wait_for(lambda: any(e["id"] == j["id"] and e["state"] == "done" for e in events), timeout=20, what="SSE done event")
+        mine = [e for e in events if e["id"] == j["id"]]
+        assert mine[0]["event"] == "created" and {"created", "state"} <= {e["event"] for e in mine}, mine
+        has(mine[-1], "event", "id", "type", "state", "progress", "error", "ts")
+        assert all(e["type"] == "sidecars" for e in events), "type filter"
+        conn.close()
+    check("jobs: SSE /api/jobs/events streams state changes", t_sse)
+
+    def t_long_job():
+        # a symlinked file large enough that its rate-limited full hash takes a while (LAZY_HASH_MB_S=64)
+        req("PUT", "/api/schedules/hash", {"enabled": False}, expect=200)
+        big = os.path.join(work, "ext", "Movies", "Long Hash (2003).mkv")
+        os.makedirs(os.path.dirname(big), exist_ok=True)
+        make_video(big, 320, 180, 911)
+        with open(big, "r+b") as fh:
+            fh.truncate(os.path.getsize(big) + 1536 * 1024 * 1024)  # sparse tail
+        link = os.path.join(state["ingest_dir"], "Long Hash (2003).mkv")
+        os.symlink(big, link)
+        it = wait_for(lambda: items(q="Long Hash")["items"], timeout=40, what="big link ingested")[0]
+        fid = get(f"/api/items/{it['id']}")["files"][0]["id"]
+        # the ingest queued a hash job: cancel it while it runs
+        def running_hash():
+            js = get("/api/jobs?type=hash&state=running")["jobs"]
+            return js[0] if js else None
+        h = wait_for(running_hash, timeout=30, what="hash job running")
+        c = req("POST", f"/api/jobs/{h['id']}/cancel", expect=200)[1]
+        assert c["state"] in ("running", "cancelled")
+        c = wait_job(h["id"], ("cancelled",), timeout=20)
+        assert c["error"] == "cancelled" and c["finished_at"]
+        assert get(f"/api/items/{it['id']}")["files"][0]["hash_state"] == "pending"
+        # an explicit job for that file: pause mid-file, resume, done
+        j = req("POST", "/api/jobs", {"type": "hash", "params": {"file_id": fid}}, expect=201)[1]
+        wait_job(j["id"], ("running",), timeout=20)
+        time.sleep(2)
+        assert req("POST", f"/api/jobs/{j['id']}/pause", expect=200)[1]["state"] in ("running", "paused")
+        p = wait_job(j["id"], ("paused",), timeout=20)
+        assert p["finished_at"] is None and get(f"/api/items/{it['id']}")["files"][0]["hash_state"] == "pending"
+        assert any("paused" in l["msg"] for l in p["logs"]), p["logs"]
+        time.sleep(1.5)
+        assert job(j["id"])["state"] == "paused", "paused jobs stay parked"
+        req("POST", f"/api/jobs/{j['id']}/resume", expect=200)
+        d = wait_job(j["id"], ("done", "failed"), timeout=90)
+        assert d["state"] == "done" and d["result"]["hashed"] == 1, d
+        assert get(f"/api/items/{it['id']}")["files"][0]["hash_state"] == "full"
+        req("PUT", "/api/schedules/hash", {"enabled": True}, expect=200)
+        req("DELETE", f"/api/items/{it['id']}", expect=200)
+        assert os.path.isfile(big)
+    check("jobs: cancel a long (hash) job, pause it mid-file, resume to completion", t_long_job)
+
     shutil.rmtree(work, ignore_errors=True)
     print(f"\n{PASSES} passed, {len(FAILS)} failed")
 

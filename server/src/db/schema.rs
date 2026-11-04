@@ -158,3 +158,41 @@ pub fn ensure_external(conn: &Connection) -> Result<(), String> {
     }
     conn.execute_batch("CREATE INDEX IF NOT EXISTS media_files_hash_state ON media_files(hash_state)").map_err(|e| e.to_string())
 }
+
+/// Jobs, job logs and schedules (docs/STORAGE.md "Jobs and schedules"), and the `job_id` link of
+/// ingest records. Idempotent, run on every startup.
+const JOBS: &str = r#"
+CREATE TABLE IF NOT EXISTS jobs (
+    id TEXT PRIMARY KEY, type TEXT NOT NULL, params TEXT NOT NULL DEFAULT '{}', state TEXT NOT NULL,
+    priority INTEGER NOT NULL DEFAULT 0, progress TEXT,
+    attempts INTEGER NOT NULL DEFAULT 0, max_attempts INTEGER NOT NULL DEFAULT 1,
+    error TEXT, result TEXT, checkpoint TEXT,
+    created_at INTEGER NOT NULL, run_at INTEGER NOT NULL, started_at INTEGER, finished_at INTEGER,
+    parent_id TEXT, schedule_id TEXT
+);
+CREATE INDEX IF NOT EXISTS jobs_dispatch ON jobs(state, priority, run_at);
+CREATE INDEX IF NOT EXISTS jobs_type_state ON jobs(type, state);
+CREATE INDEX IF NOT EXISTS jobs_created ON jobs(created_at);
+CREATE TABLE IF NOT EXISTS job_logs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT, job_id TEXT NOT NULL, ts INTEGER NOT NULL,
+    level TEXT NOT NULL, msg TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS job_logs_job ON job_logs(job_id, id);
+CREATE TABLE IF NOT EXISTS schedules (
+    id TEXT PRIMARY KEY, type TEXT NOT NULL, params TEXT NOT NULL DEFAULT '{}',
+    interval_secs INTEGER, cron TEXT, enabled INTEGER NOT NULL DEFAULT 1,
+    next_run INTEGER, last_run INTEGER, last_job_id TEXT, edited INTEGER NOT NULL DEFAULT 0
+);
+"#;
+
+pub fn ensure_jobs(conn: &Connection) -> Result<(), String> {
+    conn.execute_batch(JOBS).map_err(|e| e.to_string())?;
+    let has: bool = conn
+        .prepare("SELECT 1 FROM pragma_table_info('ingests') WHERE name = 'job_id'")
+        .and_then(|mut st| st.exists([]))
+        .map_err(|e| e.to_string())?;
+    if !has {
+        conn.execute_batch("ALTER TABLE ingests ADD COLUMN job_id TEXT").map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}

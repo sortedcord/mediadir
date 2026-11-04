@@ -43,6 +43,7 @@ impl Db {
         schema::ensure_relations(&conn).map_err(AppError::Internal)?;
         schema::ensure_assets(&conn).map_err(AppError::Internal)?;
         schema::ensure_external(&conn).map_err(AppError::Internal)?;
+        schema::ensure_jobs(&conn).map_err(AppError::Internal)?;
         Ok(Db { pool })
     }
 

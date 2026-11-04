@@ -142,7 +142,6 @@ pub struct Writer {
     devices: HashMap<String, DevAgg>,
     device_users: HashMap<(String, String), DevAgg>,
     force: bool,
-    raw_days: u64,
 }
 
 pub fn status_class(status: u16) -> String {
@@ -150,7 +149,7 @@ pub fn status_class(status: u16) -> String {
 }
 
 impl Writer {
-    pub fn new(db: AnalyticsDb, main: Db, play_idle: i64, dev_idle: i64, raw_days: u64) -> Self {
+    pub fn new(db: AnalyticsDb, main: Db, play_idle: i64, dev_idle: i64) -> Self {
         Writer {
             db,
             main,
@@ -161,7 +160,6 @@ impl Writer {
             devices: HashMap::new(),
             device_users: HashMap::new(),
             force: false,
-            raw_days,
         }
     }
 
@@ -340,23 +338,6 @@ impl Writer {
         self.force = false;
     }
 
-    /// Delete raw request rows older than `raw_days` (aggregates are kept forever).
-    pub fn prune(&self, now: i64) {
-        let cutoff = (now - self.raw_days as i64 * 86400).div_euclid(3600) * 3600;
-        let Ok(conn) = self.db.conn() else { return };
-        let prev: i64 = meta_get(&conn, "raw_pruned_until").and_then(|v| v.parse().ok()).unwrap_or(0);
-        let cutoff = cutoff.max(prev);
-        match conn.execute("DELETE FROM requests WHERE ts < ?1", [cutoff]) {
-            Ok(n) => {
-                let _ = meta_set(&conn, "raw_pruned_until", &cutoff.to_string());
-                if n > 0 {
-                    println!("analytics: pruned {n} raw request rows older than {} day(s)", self.raw_days);
-                }
-            }
-            Err(e) => eprintln!("analytics: prune failed: {e}"),
-        }
-    }
-
     pub fn close_dangling(&self) {
         if let Ok(conn) = self.db.conn() {
             let _ = conn.execute("UPDATE playback_sessions SET ended_at = last_at, state = 'stopped' WHERE ended_at IS NULL", []);
@@ -365,12 +346,24 @@ impl Writer {
     }
 }
 
+/// Delete raw request rows older than `raw_days` (aggregates are kept forever). Returns how many.
+pub fn prune_raw(db: &AnalyticsDb, raw_days: u64, now: i64) -> AppResult<usize> {
+    let cutoff = (now - raw_days as i64 * 86400).div_euclid(3600) * 3600;
+    let conn = db.conn()?;
+    let prev: i64 = meta_get(&conn, "raw_pruned_until").and_then(|v| v.parse().ok()).unwrap_or(0);
+    let cutoff = cutoff.max(prev);
+    let n = conn.execute("DELETE FROM requests WHERE ts < ?1", [cutoff])?;
+    meta_set(&conn, "raw_pruned_until", &cutoff.to_string())?;
+    if n > 0 {
+        println!("analytics: pruned {n} raw request rows older than {raw_days} day(s)");
+    }
+    Ok(n)
+}
+
 pub fn run(rx: Receiver<Msg>, mut w: Writer) {
     let now = crate::db::now;
     w.close_dangling();
-    w.prune(now());
     let mut last_flush = Instant::now();
-    let mut last_prune = Instant::now();
     loop {
         match rx.recv_timeout(Duration::from_millis(250)) {
             Ok(m) => {
@@ -394,10 +387,6 @@ pub fn run(rx: Receiver<Msg>, mut w: Writer) {
             w.tracker.expire(now());
             w.flush();
             last_flush = Instant::now();
-        }
-        if last_prune.elapsed() >= Duration::from_secs(3600) {
-            w.prune(now());
-            last_prune = Instant::now();
         }
     }
 }

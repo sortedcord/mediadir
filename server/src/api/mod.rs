@@ -5,6 +5,7 @@ mod assets;
 mod fields;
 mod ingest;
 mod items;
+mod jobs;
 mod libraries;
 mod media;
 mod people;
@@ -29,6 +30,7 @@ pub struct AppState {
     pub ingest: Arc<Ingest>,
     pub tasks: Arc<Maintenance>,
     pub analytics: Arc<crate::analytics::Analytics>,
+    pub jobs: Arc<crate::jobs::Jobs>,
 }
 
 pub type Shared = Arc<AppState>;
@@ -45,9 +47,11 @@ pub fn router(state: Shared) -> Router {
         .merge(search::routes())
         .merge(assets::routes())
         .merge(analytics::routes())
+        .merge(jobs::routes())
         .layer(CompressionLayer::new());
     Router::new()
         .merge(api)
+        .merge(jobs::sse_routes())
         .merge(media::routes())
         .fallback(|| async { crate::error::AppError::NotFound("no such route".into()) })
         .layer(axum::middleware::from_fn_with_state(state.analytics.clone(), crate::analytics::middleware::log))

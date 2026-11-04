@@ -22,14 +22,20 @@ use serde::Serialize;
 use std::collections::{HashMap, HashSet};
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+use crate::jobs::{Jobs, NewJob};
+use serde_json::json;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use store::Store;
-use tokio::sync::{mpsc, Semaphore};
 
-/// Files processed at the same time (hashing is I/O bound; keep it to 1-2).
-const PIPELINE_SLOTS: usize = 2;
+pub use lazy::HashHandler;
+
+/// Never stop (for callers outside a job).
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) fn never() -> bool {
+    false
+}
 
 pub struct Ingest {
     db: Db,
@@ -43,10 +49,8 @@ pub struct Ingest {
     seen: Mutex<HashMap<(u64, u64), (u64, i64)>>,
     /// Hashes being placed right now (duplicate detection before their DB row exists).
     inflight: Mutex<HashSet<String>>,
-    slots: Arc<Semaphore>,
-    queue_tx: mpsc::UnboundedSender<PathBuf>,
-    queue_rx: Mutex<Option<mpsc::UnboundedReceiver<PathBuf>>>,
-    active: AtomicUsize,
+    /// Settled files become `ingest` jobs here (concurrency = the `ingest` worker limit).
+    pub jobs: Arc<Jobs>,
     watching: AtomicBool,
     watcher: Mutex<Option<notify::RecommendedWatcher>>,
     counter: AtomicU64,
@@ -57,8 +61,6 @@ pub struct Ingest {
 struct Runtime {
     /// Waiting for size+mtime to settle.
     pending: HashMap<PathBuf, Pending>,
-    /// Queued or being processed.
-    queued: HashSet<PathBuf>,
 }
 
 struct Pending {
@@ -73,11 +75,14 @@ pub struct QueueStatus {
     pub watching: bool,
     pub poll_secs: u64,
     pub settle_secs: u64,
-    /// Files queued or being processed.
+    /// Files queued or being processed (`ingest` jobs queued or running).
     pub queue: usize,
     /// Files waiting for their size/mtime to settle.
     pub settling: usize,
+    /// `ingest` jobs running.
     pub active: usize,
+    /// `ingest` jobs paused (not counted in `queue`).
+    pub paused: usize,
 }
 
 /// Why a file name is not ingested, if it isn't.
@@ -140,7 +145,7 @@ pub struct Deleted {
 }
 
 impl Ingest {
-    pub fn new(db: Db, cfg: &Config) -> AppResult<Arc<Self>> {
+    pub fn new(db: Db, cfg: &Config, jobs: Arc<Jobs>) -> AppResult<Arc<Self>> {
         cfg.check_same_fs().map_err(AppError::Internal)?;
         std::fs::create_dir_all(&cfg.ingest_dir)?;
         let store = Store::open(&cfg.media_dir)?;
@@ -160,7 +165,6 @@ impl Ingest {
         migrate::reconcile_leftovers(&repo, &store, &cfg.ingest_dir);
         let seen = repo.all_seen()?.into_iter().map(|k| ((k.dev, k.ino), (k.size, k.mtime))).collect();
         drop(conn);
-        let (tx, rx) = mpsc::unbounded_channel();
         Ok(Arc::new(Ingest {
             db,
             ingest_dir: cfg.ingest_dir.clone(),
@@ -171,10 +175,7 @@ impl Ingest {
             rt: Mutex::new(Runtime::default()),
             seen: Mutex::new(seen),
             inflight: Mutex::new(HashSet::new()),
-            slots: Arc::new(Semaphore::new(PIPELINE_SLOTS)),
-            queue_tx: tx,
-            queue_rx: Mutex::new(Some(rx)),
-            active: AtomicUsize::new(0),
+            jobs,
             watching: AtomicBool::new(false),
             watcher: Mutex::new(None),
             counter: AtomicU64::new(0),
@@ -182,21 +183,46 @@ impl Ingest {
         }))
     }
 
-    /// Start watching, polling and processing the ingest dir.
+    /// Start watching and polling the ingest dir (settled files become `ingest` jobs).
     pub fn start(self: &Arc<Self>) {
         watch::start(self.clone());
-        lazy::start(self.clone());
     }
 
+    /// Blocking (reads the job table).
     pub fn status(&self) -> QueueStatus {
-        let rt = self.rt.lock().unwrap();
+        let settling = self.rt.lock().unwrap().pending.len();
+        let (queued, running, paused) = self
+            .db
+            .conn()
+            .and_then(|c| {
+                let r = Repo::new(&c);
+                Ok((r.count_jobs("ingest", &["queued"])?, r.count_jobs("ingest", &["running"])?, r.count_jobs("ingest", &["paused"])?))
+            })
+            .unwrap_or((0, 0, 0));
         QueueStatus {
             watching: self.watching.load(Ordering::Relaxed),
             poll_secs: self.poll.map(|p| p.as_secs()).unwrap_or(0),
             settle_secs: self.settle.as_secs(),
-            queue: rt.queued.len(),
-            settling: rt.pending.len(),
-            active: self.active.load(Ordering::Relaxed),
+            queue: (queued + running) as usize,
+            settling,
+            active: running as usize,
+            paused: paused as usize,
+        }
+    }
+
+    /// Whether an unfinished `ingest` job exists for this ingest-dir path.
+    fn has_job(&self, path: &Path) -> bool {
+        let p = path.to_string_lossy();
+        self.db.conn().and_then(|c| Repo::new(&c).active_job_with("ingest", "path", &p)).ok().flatten().is_some()
+    }
+
+    /// Queue a settled ingest-dir file as an `ingest` job (one per path at a time).
+    fn enqueue_path(&self, path: &Path, delay: Option<Duration>) {
+        let p = path.to_string_lossy().to_string();
+        let mut req = NewJob::of("ingest", json!({ "path": p }));
+        req.run_at = delay.map(|d| now() + d.as_secs() as i64);
+        if let Err(e) = self.jobs.enqueue_unique(req, Some(("path", &p))) {
+            eprintln!("ingest: cannot queue {}: {e}", path.display());
         }
     }
 
@@ -217,6 +243,7 @@ impl Ingest {
             placement: None,
             ingested_at: now(),
             updated_at: now(),
+            job_id: None,
         }
     }
 
@@ -299,29 +326,68 @@ impl Ingest {
         Ok((retried, skipped))
     }
 
-    /// A settled ingest-dir file, on the blocking pool.
-    fn process_queued(&self, path: PathBuf) {
-        let retry = (|| {
-            let key = stat_key(&path)?;
-            if self.is_seen(&key) {
-                return None;
+    /// A settled ingest-dir file (the body of an `ingest` job). `None` = nothing to do (gone,
+    /// or already handled).
+    pub(crate) fn process_path(&self, path: &Path, job_id: Option<&str>, stop: &dyn Fn() -> bool) -> Option<IngestRecord> {
+        let key = stat_key(path)?;
+        if self.is_seen(&key) {
+            return None;
+        }
+        let name = path.file_name()?.to_string_lossy().to_string();
+        let mut rec = self.new_record("ingest", path.to_string_lossy().to_string(), name, Some(key.size));
+        rec.job_id = job_id.map(String::from);
+        self.save(&rec);
+        let retry = self.run_ctl(&mut rec, path, Some(key), stop);
+        if std::fs::symlink_metadata(path).is_err() {
+            // the entry moved into the store: nothing is left in the ingest dir to remember
+            self.prune_empty_parents(path);
+        } else if retry {
+            // changed while it was processed: a new job once it had time to settle again
+            self.enqueue_path(path, Some(self.settle.max(Duration::from_secs(1))));
+        } else {
+            // failed / duplicate / ignored / cancelled entries stay in place and are never retried endlessly
+            self.remember(&key, path, &rec);
+        }
+        Some(rec)
+    }
+
+    /// An `ingest` job was cancelled before it ran: record it like a failure (retryable) so the
+    /// next scan does not pick the entry up again.
+    pub(crate) fn cancel_path(&self, path: &Path, job_id: &str) {
+        let Some(key) = stat_key(path) else { return };
+        let name = path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+        let mut rec = self.new_record("ingest", path.to_string_lossy().to_string(), name, Some(key.size));
+        rec.job_id = Some(job_id.into());
+        rec.state = "failed".into();
+        rec.error = Some("cancelled".into());
+        self.save(&rec);
+        self.remember(&key, path, &rec);
+    }
+
+    /// The staged upload of an `ingest` job (record already saved by [`Ingest::upload`]).
+    pub(crate) fn process_upload(&self, rec_id: &str, staging: &Path, job_id: &str, stop: &dyn Fn() -> bool) -> AppResult<IngestRecord> {
+        let mut rec = {
+            let conn = self.db.conn()?;
+            Repo::new(&conn).get_ingest(rec_id)?
+        };
+        rec.job_id = Some(job_id.into());
+        if std::fs::metadata(staging).is_err() {
+            self.finish(&mut rec, "failed", Some("staged upload is gone (server restarted?)".into()));
+        } else {
+            self.run_ctl(&mut rec, staging, None, stop);
+        }
+        // duplicate / ignored / failed uploads leave nothing behind
+        let _ = std::fs::remove_file(staging);
+        Ok(rec)
+    }
+
+    /// An upload job that never ran: the record fails and the staged bytes go.
+    pub(crate) fn cancel_upload(&self, rec_id: &str, staging: &Path) {
+        let _ = std::fs::remove_file(staging);
+        if let Ok(mut rec) = self.db.conn().and_then(|c| Repo::new(&c).get_ingest(rec_id)) {
+            if !matches!(rec.state.as_str(), "done" | "duplicate" | "ignored" | "failed") {
+                self.finish(&mut rec, "failed", Some("cancelled".into()));
             }
-            let name = path.file_name()?.to_string_lossy().to_string();
-            let mut rec = self.new_record("ingest", path.to_string_lossy().to_string(), name, Some(key.size));
-            self.save(&rec);
-            let retry = self.run(&mut rec, &path, Some(key));
-            if std::fs::symlink_metadata(&path).is_err() {
-                // the entry moved into the store: nothing is left in the ingest dir to remember
-                self.prune_empty_parents(&path);
-            } else if !retry {
-                // failed / duplicate / ignored entries stay in place and are never retried endlessly
-                self.remember(&key, &path, &rec);
-            }
-            Some(retry)
-        })();
-        self.rt.lock().unwrap().queued.remove(&path);
-        if retry == Some(true) {
-            self.note(&path);
         }
     }
 
@@ -361,22 +427,34 @@ impl Ingest {
                 return Ok(rec);
             }
         }
-        let permit = self.slots.clone().acquire_owned().await.map_err(|_| AppError::Internal("ingest closed".into()))?;
+        self.save(&rec);
+        // an `ingest` job (shares the ingest worker limit); the request waits for it
+        let job = {
+            let me = self.clone();
+            let (rid, st) = (rec.id.clone(), staging.to_string_lossy().to_string());
+            tokio::task::spawn_blocking(move || me.jobs.enqueue(NewJob::of("ingest", json!({ "upload": rid, "staging": st })))).await??
+        };
         let me = self.clone();
-        Ok(tokio::task::spawn_blocking(move || {
-            let _permit = permit;
-            me.run(&mut rec, &staging, None);
-            // duplicate / ignored / failed uploads leave nothing behind
-            let _ = std::fs::remove_file(&staging);
-            rec
-        })
-        .await?)
+        let (rid, jid) = (rec.id.clone(), job.id.clone());
+        tokio::task::spawn_blocking(move || me.db.conn().and_then(|c| Repo::new(&c).set_ingest_job(&rid, &jid))).await??;
+        self.jobs.wait(&job.id).await?;
+        let rid = rec.id.clone();
+        let rec = self.db.call(move |r| r.get_ingest(&rid)).await?;
+        let _ = tokio::fs::remove_file(&staging).await;
+        Ok(rec)
     }
 
     /// Run the pipeline; the record ends in a final state. Returns true when the source changed
     /// while it was processed (it is retried once it settles again).
+    #[cfg(test)]
     fn run(&self, rec: &mut IngestRecord, src: &Path, key: Option<SeenKey>) -> bool {
-        match self.try_run(rec, src, key) {
+        self.run_ctl(rec, src, key, &never)
+    }
+
+    /// [`Ingest::run`] that stops at its checkpoints (after hashing, before placing) once
+    /// `stop()` is true: the record then fails with error `cancelled`.
+    fn run_ctl(&self, rec: &mut IngestRecord, src: &Path, key: Option<SeenKey>, stop: &dyn Fn() -> bool) -> bool {
+        match self.try_run(rec, src, key, stop) {
             Ok(retry) => retry,
             Err(e) => {
                 eprintln!("ingest: {} failed: {e}", rec.name);
@@ -398,7 +476,14 @@ impl Ingest {
         self.set_state(rec, state);
     }
 
-    fn try_run(&self, rec: &mut IngestRecord, src: &Path, key: Option<SeenKey>) -> AppResult<bool> {
+    fn try_run(&self, rec: &mut IngestRecord, src: &Path, key: Option<SeenKey>, stop: &dyn Fn() -> bool) -> AppResult<bool> {
+        let cancelled = |me: &Self, rec: &mut IngestRecord| -> AppResult<bool> {
+            me.finish(rec, "failed", Some("cancelled".into()));
+            Ok(false)
+        };
+        if stop() {
+            return cancelled(self, rec);
+        }
         self.set_state(rec, "hashing");
         let is_link = std::fs::symlink_metadata(src).map(|m| m.file_type().is_symlink()).unwrap_or(false);
         let reference = if is_link {
@@ -414,8 +499,14 @@ impl Ingest {
         };
         let (hash, size) = match &reference {
             Some(r) => (format!("fp:{}", r.fp), r.size),
-            None => store::hash_file(src)?,
+            None => match store::hash_file_ctl(src, 0, stop) {
+                Err(e) if e.kind() == std::io::ErrorKind::Interrupted => return cancelled(self, rec),
+                r => r?,
+            },
         };
+        if stop() {
+            return cancelled(self, rec);
+        }
         rec.hash = Some(hash.clone());
         rec.size = Some(size);
         if let Some(k) = key {
@@ -460,6 +551,9 @@ impl Ingest {
             return Ok(false);
         };
 
+        if stop() {
+            return cancelled(self, rec);
+        }
         let ext = ext_of(Path::new(&rec.name));
         self.set_state(rec, "placing");
         let rel = Store::rel_path(&hash, &ext);
@@ -515,6 +609,12 @@ impl Ingest {
             if attached.version_of_existing { ", new version" } else { "" }
         );
         self.finish(rec, "done", None);
+        if reference.is_some() {
+            // its full hash is computed by a `hash` job
+            if let Err(e) = self.jobs.enqueue_unique(NewJob::of("hash", json!({})), None) {
+                eprintln!("ingest: cannot queue the full hash: {e}");
+            }
+        }
         Ok(false)
     }
 
@@ -600,7 +700,8 @@ mod tests {
         cfg.media_dir = root.join("store");
         cfg.data_dir = root.join("data");
         let db = Db::open(&cfg.data_dir.join("t.db")).unwrap();
-        (root, Ingest::new(db, &cfg).unwrap())
+        let jobs = Jobs::new(db.clone(), crate::jobs::JobsConfig::from_config(&cfg).unwrap());
+        (root, Ingest::new(db, &cfg, jobs).unwrap())
     }
 
     /// A tiny real media file (ffmpeg is a hard dependency of the server anyway).
@@ -745,7 +846,8 @@ mod tests {
         cfg.data_dir = root.join("data");
         cfg.lazy_hash_rate = 0;
         let db = Db::open(&cfg.data_dir.join("t.db")).unwrap();
-        (root.clone(), root.join("ext"), Ingest::new(db, &cfg).unwrap())
+        let jobs = Jobs::new(db.clone(), crate::jobs::JobsConfig::from_config(&cfg).unwrap());
+        (root.clone(), root.join("ext"), Ingest::new(db, &cfg, jobs).unwrap())
     }
 
     fn run_link(ing: &Arc<Ingest>, link: &Path) -> IngestRecord {

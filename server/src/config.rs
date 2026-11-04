@@ -38,6 +38,16 @@ pub struct Config {
     pub analytics_play_idle: u64,
     /// Seconds of request inactivity before a device session closes.
     pub analytics_device_idle: u64,
+    /// Default cadence of the `hash` schedule (full hash of symlinked files), `None` = off.
+    pub hash_interval: Option<Duration>,
+    /// Default cadence of the `analytics_rollup` schedule (raw request-row pruning), `None` = off.
+    pub analytics_rollup: Option<Duration>,
+    /// Jobs: worker threads in total, `type=n,...` per-type overrides, retention.
+    pub jobs_max_workers: usize,
+    pub jobs_concurrency: String,
+    pub jobs_retention_days: u64,
+    pub jobs_failed_retention_days: u64,
+    pub jobs_log_keep: u64,
 }
 
 fn absolute(p: PathBuf) -> PathBuf {
@@ -75,6 +85,13 @@ impl Config {
             analytics_raw_days: secs("ANALYTICS_RAW_DAYS", 30),
             analytics_play_idle: secs("ANALYTICS_PLAYBACK_IDLE_SECS", 300).max(1),
             analytics_device_idle: secs("ANALYTICS_DEVICE_IDLE_SECS", 1800).max(1),
+            hash_interval: every("LAZY_HASH_INTERVAL", 60),
+            analytics_rollup: every("ANALYTICS_ROLLUP_SECS", 3600),
+            jobs_max_workers: secs("JOBS_MAX_WORKERS", 6).max(1) as usize,
+            jobs_concurrency: env("JOBS_CONCURRENCY").unwrap_or_default(),
+            jobs_retention_days: secs("JOBS_RETENTION_DAYS", 14),
+            jobs_failed_retention_days: secs("JOBS_FAILED_RETENTION_DAYS", 30),
+            jobs_log_keep: secs("JOBS_LOG_LINES", 200).max(1),
         }
     }
 

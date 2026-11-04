@@ -83,6 +83,7 @@ fn mkdir_private(dir: &Path) -> io::Result<()> {
 }
 
 /// BLAKE3 of the full content, streamed. Returns (hex hash, bytes read).
+#[cfg(test)]
 pub fn hash_file(path: &Path) -> io::Result<(String, u64)> {
     let mut hasher = blake3::Hasher::new();
     let f = File::open(path)?;
@@ -123,7 +124,9 @@ pub fn fingerprint(path: &Path) -> io::Result<(String, u64, i64)> {
 }
 
 /// Full BLAKE3, read at no more than `rate` bytes/second (`0` = unlimited). Read-only.
-pub fn hash_file_throttled(path: &Path, rate: u64) -> io::Result<(String, u64)> {
+/// Full BLAKE3 of a file read at most `rate` bytes/second (`0` = unlimited), that gives up (`ErrorKind::Interrupted`) as soon as `stop()` is true
+/// (checked every MiB): a cancelled / paused job stops mid-file.
+pub fn hash_file_ctl(path: &Path, rate: u64, stop: &dyn Fn() -> bool) -> io::Result<(String, u64)> {
     use std::io::Read;
     let mut f = File::open(path)?;
     let mut h = blake3::Hasher::new();
@@ -131,6 +134,9 @@ pub fn hash_file_throttled(path: &Path, rate: u64) -> io::Result<(String, u64)> 
     let started = std::time::Instant::now();
     let mut n = 0u64;
     loop {
+        if stop() {
+            return Err(io::Error::new(io::ErrorKind::Interrupted, "stopped"));
+        }
         let r = f.read(&mut buf)?;
         if r == 0 {
             break;

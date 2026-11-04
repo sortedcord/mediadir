@@ -24,9 +24,11 @@ pub struct IngestRecord {
     pub placement: Option<String>,
     pub ingested_at: i64,
     pub updated_at: i64,
+    /// The `ingest` job that processed it (`GET /api/jobs/{id}`); null for records from before jobs.
+    pub job_id: Option<String>,
 }
 
-const COLS: &str = "id, source, origin, name, size, hash, state, error, item_id, file_id, placement, ingested_at, updated_at";
+const COLS: &str = "id, source, origin, name, size, hash, state, error, item_id, file_id, placement, ingested_at, updated_at, job_id";
 
 fn row_to_record(r: &Row) -> rusqlite::Result<IngestRecord> {
     Ok(IngestRecord {
@@ -43,6 +45,7 @@ fn row_to_record(r: &Row) -> rusqlite::Result<IngestRecord> {
         placement: r.get(10)?,
         ingested_at: r.get(11)?,
         updated_at: r.get(12)?,
+        job_id: r.get(13)?,
     })
 }
 
@@ -59,7 +62,7 @@ pub struct SeenKey {
 impl Repo<'_> {
     pub fn save_ingest(&self, rec: &IngestRecord) -> AppResult<()> {
         self.conn.execute(
-            &format!("INSERT OR REPLACE INTO ingests ({COLS}) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13)"),
+            &format!("INSERT OR REPLACE INTO ingests ({COLS}) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14)"),
             params![
                 rec.id,
                 rec.source,
@@ -74,6 +77,7 @@ impl Repo<'_> {
                 rec.placement,
                 rec.ingested_at,
                 now(),
+                rec.job_id,
             ],
         )?;
         Ok(())

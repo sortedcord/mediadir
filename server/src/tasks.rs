@@ -1,15 +1,16 @@
-//! Periodic durability tasks: sidecar manifests, integrity verification (media files and image
-//! assets), database backups, unreferenced-asset garbage collection.
+//! Durability tasks: sidecar manifests, integrity verification (media files and image assets),
+//! database backups, unreferenced-asset garbage collection. They run as jobs (`sidecars`,
+//! `verify`, `backup`, `asset_gc`; see src/jobs/handlers.rs) on their schedules.
 //! Results are reported at `GET /api/ingest/status`.
 
 use crate::assets::AssetService;
 use crate::config::Config;
 use crate::db::{now, now_ms, Db, Repo};
 use crate::error::AppResult;
-use crate::ingest::store::{hash_file, Store};
+use crate::ingest::store::Store;
 use crate::model::Item;
 use serde::{Deserialize, Serialize};
-use serde_json::json;
+use serde_json::{json, Value};
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -47,23 +48,34 @@ pub struct Maintenance {
     cfg: Config,
 }
 
-#[derive(Clone, Copy)]
-enum Task {
-    Sidecars,
-    Verify,
-    Backup,
-    AssetGc,
+/// Meta keys holding the last successful run of each task (unix seconds).
+pub fn meta_key(kind: &str) -> Option<&'static str> {
+    Some(match kind {
+        "sidecars" => "last_sidecar_sync",
+        "verify" => "last_verify",
+        "backup" => "last_backup",
+        "asset_gc" => "last_asset_gc",
+        _ => return None,
+    })
 }
 
-impl Task {
-    fn meta_key(self) -> &'static str {
-        match self {
-            Task::Sidecars => "last_sidecar_sync",
-            Task::Verify => "last_verify",
-            Task::Backup => "last_backup",
-            Task::AssetGc => "last_asset_gc",
-        }
-    }
+/// How a long task is driven from a job: stop requests, checkpoints and progress.
+pub struct Hooks<'a> {
+    pub stop: &'a dyn Fn() -> bool,
+    pub checkpoint: Option<Value>,
+    pub save: &'a dyn Fn(Value),
+    pub progress: &'a dyn Fn(u64, u64),
+}
+
+
+/// Where an interrupted verify run resumes: the rotating re-hash slices that are left, and what
+/// the finished part of them found.
+#[derive(Debug, Default, Serialize, Deserialize)]
+struct VerifyCheckpoint {
+    files_left: usize,
+    assets_left: usize,
+    rehashed: Vec<String>,
+    problems: Vec<Problem>,
 }
 
 impl Maintenance {
@@ -71,50 +83,16 @@ impl Maintenance {
         Arc::new(Maintenance { db, store, assets, analytics, backups: cfg.data_dir.join("backups"), cfg: cfg.clone() })
     }
 
-    pub fn spawn(self: &Arc<Self>) {
-        for (task, every) in [
-            (Task::Sidecars, self.cfg.sidecar_interval),
-            (Task::Verify, self.cfg.verify_interval),
-            (Task::Backup, self.cfg.backup_interval),
-            (Task::AssetGc, self.cfg.asset_gc_interval),
-        ] {
-            let Some(every) = every else { continue };
-            let me = self.clone();
-            tokio::spawn(async move {
-                // continue the cadence across restarts
-                let last = me.db.call(move |r| Ok(r.meta_get(task.meta_key())?.and_then(|v| v.parse::<i64>().ok()))).await.ok().flatten();
-                let wait = match last {
-                    Some(l) => Duration::from_secs((l + every.as_secs() as i64 - now()).clamp(1, every.as_secs() as i64) as u64),
-                    None => every,
-                };
-                tokio::time::sleep(wait).await;
-                loop {
-                    let m = me.clone();
-                    let res = tokio::task::spawn_blocking(move || m.run(task)).await;
-                    match res {
-                        Ok(Ok(msg)) => println!("tasks: {msg}"),
-                        Ok(Err(e)) => eprintln!("tasks: {} failed: {e}", task.meta_key()),
-                        Err(e) => eprintln!("tasks: {} panicked: {e}", task.meta_key()),
-                    }
-                    tokio::time::sleep(every).await;
-                }
-            });
+    pub fn mark_done(&self, kind: &str) -> AppResult<()> {
+        if let Some(k) = meta_key(kind) {
+            let conn = self.db.conn()?;
+            Repo::new(&conn).meta_set(k, &now().to_string())?;
         }
+        Ok(())
     }
 
-    fn run(&self, task: Task) -> AppResult<String> {
-        let msg = match task {
-            Task::Sidecars => format!("sidecars: wrote {}", self.sync_sidecars()?),
-            Task::Verify => {
-                let p = self.verify()?;
-                format!("verify: {} problem(s)", p.len())
-            }
-            Task::Backup => format!("backup: {}", self.backup()?.display()),
-            Task::AssetGc => format!("asset gc: removed {}", self.gc_assets(self.cfg.asset_gc_grace)?),
-        };
-        let conn = self.db.conn()?;
-        Repo::new(&conn).meta_set(task.meta_key(), &now().to_string())?;
-        Ok(msg)
+    pub fn asset_gc_grace(&self) -> Duration {
+        self.cfg.asset_gc_grace
     }
 
     pub fn status(&self, r: &Repo) -> AppResult<TaskStatus> {
@@ -130,7 +108,8 @@ impl Maintenance {
 
     /// Write `<hash>.json` next to every stored file whose item (or an ancestor) changed since
     /// its last sidecar. Enough to rebuild titles and structure without the database.
-    pub fn sync_sidecars(&self) -> AppResult<usize> {
+    /// `(written, interrupted)`; progress is kept per file (`sidecar_at`), so a re-run continues.
+    pub fn sync_sidecars_ctl(&self, stop: &dyn Fn() -> bool) -> AppResult<(usize, bool)> {
         let started = now_ms();
         let conn = self.db.conn()?;
         let repo = Repo::new(&conn);
@@ -149,6 +128,9 @@ impl Maintenance {
         };
         let mut written = 0;
         for st in repo.all_file_states()? {
+            if stop() {
+                return Ok((written, true));
+            }
             let f = &st.file;
             if f.is_external() {
                 continue; // never write next to (or about) symlinked entries
@@ -183,7 +165,7 @@ impl Maintenance {
             repo.set_sidecar_at(&f.id, started)?;
             written += 1;
         }
-        Ok(written)
+        Ok((written, false))
     }
 
     /// The store entry of a file (a regular file, or a symlink to the referenced target).
@@ -193,7 +175,19 @@ impl Maintenance {
 
     /// Every stored file must exist with the right size; a rotating slice is re-hashed so the
     /// whole store is re-hashed about once a week.
-    pub fn verify(&self) -> AppResult<Vec<Problem>> {
+    /// The verify interval: the `verify` schedule's (it sets the re-hash slice size), else VERIFY_INTERVAL.
+    fn verify_interval(&self, repo: &Repo) -> u64 {
+        repo.find_schedule("verify").ok().flatten().and_then(|s| s.interval_secs).map(|i| i as u64)
+            .or(self.cfg.verify_interval.map(|d| d.as_secs()))
+            .unwrap_or(86400)
+            .max(1)
+    }
+
+    /// [`Maintenance::verify`] as a job: `Ok(None)` = stopped; the checkpoint saved through
+    /// `hooks.save` lets the next run finish the re-hash slices instead of starting over (the
+    /// existence checks are cheap and simply run again).
+    pub fn verify_ctl(&self, hooks: Hooks) -> AppResult<Option<Vec<Problem>>> {
+        let cp: Option<VerifyCheckpoint> = hooks.checkpoint.clone().and_then(|v| serde_json::from_value(v).ok());
         let conn = self.db.conn()?;
         let repo = Repo::new(&conn);
         let files = repo.all_file_states()?;
@@ -243,23 +237,46 @@ impl Maintenance {
             }
             bad.insert(f.id.clone());
         }
-        let interval = self.cfg.verify_interval.map(|d| d.as_secs()).unwrap_or(86400).max(1);
+        let interval = self.verify_interval(&repo);
         let runs_per_week = WEEK.div_ceil(interval).max(1) as usize;
-        let slice = files.len().div_ceil(runs_per_week).max(1);
-        let mut rehashed = HashSet::new();
+        let assets = repo.all_assets()?;
+        let (slice, aslice) = match &cp {
+            Some(c) => (c.files_left, c.assets_left),
+            None => (files.len().div_ceil(runs_per_week).max(1), assets.len().div_ceil(runs_per_week).max(1)),
+        };
+        let mut rehashed: HashSet<String> = cp.as_ref().map(|c| c.rehashed.iter().cloned().collect()).unwrap_or_default();
+        let mut found: Vec<Problem> = cp.map(|c| c.problems).unwrap_or_default();
+        let total = (rehashed.len() + slice + aslice) as u64;
+        let (mut files_left, mut assets_left) = (slice, aslice);
+        let stopped = |rehashed: &HashSet<String>, found: &Vec<Problem>, files_left: usize, assets_left: usize| {
+            let c = VerifyCheckpoint { files_left, assets_left, rehashed: rehashed.iter().cloned().collect(), problems: found.clone() };
+            (hooks.save)(serde_json::to_value(&c).unwrap_or_default());
+        };
+        let hash_ctl = |p: &Path| crate::ingest::store::hash_file_ctl(p, 0, hooks.stop);
+        let interrupted = |e: &std::io::Error| e.kind() == std::io::ErrorKind::Interrupted;
+        (hooks.progress)(rehashed.len() as u64, total);
         for f in repo.files_due_for_rehash(slice as i64)? {
-            rehashed.insert(f.id.clone());
+            if (hooks.stop)() {
+                stopped(&rehashed, &found, files_left, assets_left);
+                return Ok(None);
+            }
             if !bad.contains(&f.id) {
-                match hash_file(&self.path_of(&f)) {
+                match hash_ctl(&self.path_of(&f)) {
                     Ok((h, _)) if h == f.hash => {}
-                    Ok((h, _)) => problems.push(problem("corrupt", &f, format!("content hash is {h}"))),
-                    Err(e) => problems.push(problem("missing", &f, e.to_string())),
+                    Ok((h, _)) => found.push(problem("corrupt", &f, format!("content hash is {h}"))),
+                    Err(e) if interrupted(&e) => {
+                        stopped(&rehashed, &found, files_left, assets_left);
+                        return Ok(None);
+                    }
+                    Err(e) => found.push(problem("missing", &f, e.to_string())),
                 }
             }
+            rehashed.insert(f.id.clone());
             repo.set_verified_at(&f.id, now_ms())?;
+            files_left = files_left.saturating_sub(1);
+            (hooks.progress)(rehashed.len() as u64, total);
         }
         // image assets: existence + size for all, a rotating slice re-hashed
-        let assets = repo.all_assets()?;
         let aproblem = |kind: &str, a: &crate::db::Asset, detail: String| Problem {
             problem: kind.into(),
             file_id: format!("asset:{}", a.hash),
@@ -278,18 +295,30 @@ impl Maintenance {
             }
             abad.insert(a.hash.clone());
         }
-        let aslice = assets.len().div_ceil(runs_per_week).max(1);
         for a in repo.assets_due_for_rehash(aslice as i64)? {
-            rehashed.insert(format!("asset:{}", a.hash));
+            if (hooks.stop)() {
+                stopped(&rehashed, &found, files_left, assets_left);
+                return Ok(None);
+            }
             if !abad.contains(&a.hash) {
-                match hash_file(&self.assets.path(&a)) {
+                match hash_ctl(&self.assets.path(&a)) {
                     Ok((h, _)) if h == a.hash => {}
-                    Ok((h, _)) => problems.push(aproblem("corrupt", &a, format!("content hash is {h}"))),
-                    Err(e) => problems.push(aproblem("missing", &a, e.to_string())),
+                    Ok((h, _)) => found.push(aproblem("corrupt", &a, format!("content hash is {h}"))),
+                    Err(e) if interrupted(&e) => {
+                        stopped(&rehashed, &found, files_left, assets_left);
+                        return Ok(None);
+                    }
+                    Err(e) => found.push(aproblem("missing", &a, e.to_string())),
                 }
             }
+            rehashed.insert(format!("asset:{}", a.hash));
             repo.set_asset_verified(&a.hash)?;
+            assets_left = assets_left.saturating_sub(1);
+            (hooks.progress)(rehashed.len() as u64, total);
         }
+        // re-hash findings of this run (including a resumed part) count unless the existence check already reported that file
+        let reported: HashSet<String> = problems.iter().map(|p| p.file_id.clone()).collect();
+        problems.extend(found.into_iter().filter(|p| !reported.contains(&p.file_id)));
         // hash mismatches found by earlier runs stay reported until that file is re-hashed again
         let mut current: HashSet<String> = files.iter().map(|s| s.file.id.clone()).collect();
         current.extend(assets.iter().map(|a| format!("asset:{}", a.hash)));
@@ -304,7 +333,7 @@ impl Maintenance {
             eprintln!("verify: {} {} ({}): {}", p.problem, p.path, p.item_id, p.detail);
         }
         repo.meta_set("problems", &serde_json::to_string(&problems)?)?;
-        Ok(problems)
+        Ok(Some(problems))
     }
 
     /// Delete assets that no item/person field references and that are older than `grace`
@@ -321,16 +350,30 @@ impl Maintenance {
     /// Online backup with `VACUUM INTO`, keeping the newest `BACKUP_KEEP`.
     pub fn backup(&self) -> AppResult<PathBuf> {
         std::fs::create_dir_all(&self.backups)?;
+        // written as `.tmp` and renamed, so a run interrupted by a crash never leaves a partial backup
         let path = self.backups.join(format!("mediadir-{}.db", now()));
         if !path.exists() {
+            let tmp = path.with_extension("db.tmp");
+            let _ = std::fs::remove_file(&tmp);
             let conn = self.db.conn()?;
-            conn.execute("VACUUM INTO ?1", [path.to_string_lossy()])?;
+            conn.execute("VACUUM INTO ?1", [tmp.to_string_lossy()])?;
+            std::fs::rename(&tmp, &path)?;
         }
         // analytics.db rides along (a small file; losing it loses only history)
         let apath = self.backups.join(format!("analytics-{}.db", now()));
         if !apath.exists() {
-            if let Err(e) = self.analytics.backup_to(&apath) {
-                eprintln!("backup: analytics.db: {e}");
+            let tmp = apath.with_extension("db.tmp");
+            let _ = std::fs::remove_file(&tmp);
+            match self.analytics.backup_to(&tmp) {
+                Ok(()) => std::fs::rename(&tmp, &apath)?,
+                Err(e) => eprintln!("backup: analytics.db: {e}"),
+            }
+        }
+        if let Ok(rd) = std::fs::read_dir(&self.backups) {
+            for e in rd.flatten() {
+                if e.file_name().to_string_lossy().ends_with(".db.tmp") {
+                    let _ = std::fs::remove_file(e.path()); // leftovers of a crashed run
+                }
             }
         }
         for prefix in ["mediadir-", "analytics-"] {

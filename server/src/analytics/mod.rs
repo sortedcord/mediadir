@@ -16,7 +16,6 @@ use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{sync_channel, SyncSender, TrySendError};
 use std::sync::Arc;
-use std::time::Duration;
 use store::{AnalyticsDb, Msg};
 
 const CHANNEL_CAP: usize = 16_384;
@@ -26,7 +25,7 @@ pub struct Analytics {
     tx: SyncSender<Msg>,
     /// Log events dropped because the writer could not keep up.
     pub dropped: AtomicU64,
-    snapshot_every: Option<Duration>,
+    raw_days: u64,
     pub snapshot_paths: snapshot::Paths,
 }
 
@@ -34,13 +33,13 @@ impl Analytics {
     pub fn start(cfg: &Config, main: Db) -> AppResult<Arc<Self>> {
         let db = AnalyticsDb::open(&cfg.data_dir.join("analytics.db"))?;
         let (tx, rx) = sync_channel(CHANNEL_CAP);
-        let w = store::Writer::new(db.clone(), main, cfg.analytics_play_idle as i64, cfg.analytics_device_idle as i64, cfg.analytics_raw_days);
+        let w = store::Writer::new(db.clone(), main, cfg.analytics_play_idle as i64, cfg.analytics_device_idle as i64);
         std::thread::Builder::new().name("analytics-writer".into()).spawn(move || store::run(rx, w)).map_err(|e| AppError::Internal(e.to_string()))?;
         Ok(Arc::new(Analytics {
             db,
             tx,
             dropped: AtomicU64::new(0),
-            snapshot_every: cfg.analytics_snapshot,
+            raw_days: cfg.analytics_raw_days,
             snapshot_paths: snapshot::Paths {
                 data: cfg.data_dir.clone(),
                 media: cfg.media_dir.clone(),
@@ -60,24 +59,10 @@ impl Analytics {
         }
     }
 
-    /// One snapshot at startup, then every `ANALYTICS_SNAPSHOT_SECS`.
-    pub fn spawn_snapshots(self: &Arc<Self>, main: Db, ingest: Arc<Ingest>, tasks: Arc<Maintenance>) {
-        let me = self.clone();
-        tokio::spawn(async move {
-            loop {
-                let (a, d, i, t) = (me.clone(), main.clone(), ingest.clone(), tasks.clone());
-                let res = tokio::task::spawn_blocking(move || a.snapshot_now(&d, &i, &t)).await;
-                match res {
-                    Ok(Ok(())) => {}
-                    Ok(Err(e)) => eprintln!("analytics: snapshot failed: {e}"),
-                    Err(e) => eprintln!("analytics: snapshot panicked: {e}"),
-                }
-                match me.snapshot_every {
-                    Some(every) => tokio::time::sleep(every).await,
-                    None => return,
-                }
-            }
-        });
+    /// Delete raw request rows older than ANALYTICS_RAW_DAYS (the `analytics_rollup` job;
+    /// hourly aggregates are written continuously by the writer and kept forever).
+    pub fn rollup(&self) -> AppResult<usize> {
+        store::prune_raw(&self.db, self.raw_days, now())
     }
 
     pub fn snapshot_now(&self, main: &Db, ingest: &Ingest, tasks: &Maintenance) -> AppResult<()> {

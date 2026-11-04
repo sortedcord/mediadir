@@ -188,7 +188,7 @@ All JSON. Errors: non-2xx with `{ "error": "message" }`.
 | POST | `/api/assets` | *v3:* upload an image, raw body → `{hash, mime, width, height, size}` (see [Images](#images-v3)) |
 | GET | `/asset/{hash}` | *v3:* original or transformed image, `w,h,fit,fmt,q,original` |
 | GET | `/api/ingest` · `/api/ingest/{id}` | *v3:* ingest records ([STORAGE.md](STORAGE.md)) |
-| GET | `/api/ingest/status` | *v3:* watcher/queue/task status, plus `pending_hashes` (symlinked files still awaiting their full hash). `problems[].problem` is `missing`, `corrupt` or `changed` |
+| GET | `/api/ingest/status` | *v3:* watcher/queue/task status (queue counts come from [jobs](#jobs)), plus `pending_hashes` (symlinked files still awaiting their full hash). `problems[].problem` is `missing`, `corrupt` or `changed` |
 | POST | `/api/ingest/scan` | *v3:* force a poll of the ingest dir, 202 |
 | POST | `/api/ingest/{id}/retry` | *v3:* retry one `failed` ingest-dir record: forgets its seen entry and re-queues the entry still in `INGEST_DIR`. `202 {ok, id, retrying}`; `400` if the record is not `failed` or is an upload; `404` if the entry is no longer in `INGEST_DIR` |
 | POST | `/api/ingest/retry-failed` | *v3:* same for every failed record whose entry is still in `INGEST_DIR` → `202 {ok, retried, skipped}` (`skipped` = entry gone / upload) |
@@ -367,6 +367,70 @@ active session for (device, file), or open one (any event can open a session; `s
 `stop` closes the session (trailing buffered `/stream` requests within 15 s still count towards its bytes). A session with no events or
 requests for `ANALYTICS_PLAYBACK_IDLE_SECS` is closed too. Send `progress` every ~10-30 s. Response `200`:
 `{ "ok": true, "session_id", "source", "state", "active", "file_id", "item_id", "position_s", "watched_s" }`.
+
+## Jobs
+All background work is a **job** in one persistent queue (see [STORAGE.md](STORAGE.md#jobs-and-schedules) for
+concurrency, priorities, retries, restart semantics and config). Timestamps are unix seconds. Errors use the usual
+`{"error": "…"}` shape: `400` validation, `404` unknown id, `409` operation not allowed in the job's current state.
+
+### Job
+```json
+{ "id": "3ded1ef73953f232", "type": "verify", "params": {}, "state": "running", "priority": -5,
+  "progress": { "done": 12, "total": 40, "unit": "files" },
+  "attempts": 1, "max_attempts": 1, "error": null, "result": null,
+  "created_at": 1793793449, "run_at": 1793793449, "started_at": 1793793450, "finished_at": null,
+  "parent_id": null, "schedule_id": "verify" }
+```
+- `state`: `queued | running | paused | done | failed | cancelled` (`done`/`failed`/`cancelled` are finished).
+- `progress`: null until the job reports some; `total` may be null.
+- `result`: the handler's summary when `done` (e.g. sidecars `{"written": n}`, verify `{"problems": n}`, backup `{"path"}`,
+  asset_gc `{"removed": n}`, hash `{"hashed": n, "failed": [file ids]}`, ingest `{"record_id", "state", "error", "item_id", "file_id"}`,
+  analytics_rollup `{"pruned": n}`).
+- `error`: last error (also while a failed attempt waits for its retry), `"cancelled"` when cancelled.
+- `schedule_id`: the schedule that queued it, if any.
+
+Types and their `params` (unknown keys are rejected): `ingest` `{path}` (absolute path of an entry inside `INGEST_DIR`;
+uploads use internal params `{upload, staging}`), `hash` `{}` or `{file_id}`, `verify` `{}`, `sidecars` `{}`, `backup` `{}`,
+`asset_gc` `{grace_secs?}`, `analytics_snapshot` `{}`, `analytics_rollup` `{}`.
+
+### Endpoints
+| Method | Path | |
+|---|---|---|
+| GET | `/api/jobs?state=&type=&limit=50&offset=0` | `{ "jobs": [Job], "total", "limit", "offset" }`, newest first; `limit` ≤ 1000. Bad `state`/`type` → 400 |
+| GET | `/api/jobs/{id}` | Job + `"logs": [{ "ts", "level": "info\|warn\|error", "msg" }]` (oldest first; the newest `JOBS_LOG_LINES` are kept) |
+| POST | `/api/jobs` | body `{ "type", "params"?: {}, "priority"?: int, "run_at"?: unix }` → `201` Job (`queued`). Unknown type / bad params → 400 |
+| POST | `/api/jobs/{id}/cancel` | queued/paused → `cancelled` now; running → stops at its next checkpoint (response still `running`, then `cancelled`). Finished → 409 |
+| POST | `/api/jobs/{id}/pause` | queued → `paused`; running → parks at its next checkpoint (`ingest`: 409, cancel instead); paused → no-op. Finished → 409 |
+| POST | `/api/jobs/{id}/resume` | paused → `queued` (continues from its checkpoint); running → withdraws a pending pause. Finished → 409 |
+| POST | `/api/jobs/{id}/retry` | failed/cancelled → `queued` from scratch (`attempts` 0, checkpoint dropped). Otherwise 409 |
+| DELETE | `/api/jobs/{id}` | finished jobs only (else 409) → `{ "ok": true }` |
+| GET | `/api/jobs/stats` | `{ "by_state": {state: n}, "by_type": {type: {state: n}}, "workers": { "max", "busy", "utilization": 0..1, "by_type": {type: {"running", "limit"}} } }` |
+| GET | `/api/jobs/events?type=&id=` | Server-sent events (see below) |
+| GET | `/api/schedules` | `[Schedule]` |
+| GET | `/api/schedules/{id}` | Schedule |
+| PUT | `/api/schedules/{id}` | body: any of `{ "interval_secs": ≥1, "cron": "m h dom mon dow" \| "" (clears), "enabled": bool, "params": {} }` → Schedule. Takes effect immediately (`next_run` recomputed). Bad cron/interval/unknown key → 400 |
+| POST | `/api/schedules/{id}/run` | queue its job now (even when disabled) → `201` Job; 409 while the schedule's previous job is unfinished |
+
+### Schedule
+```json
+{ "id": "verify", "type": "verify", "params": {}, "interval_secs": 86400, "cron": null, "enabled": true,
+  "next_run": 1793880000, "last_run": 1793793600, "last_job_id": "…" }
+```
+Ids: `sidecars`, `verify`, `backup`, `asset_gc`, `hash`, `analytics_snapshot`, `analytics_rollup`. `cron` is 5-field,
+UTC (`*`, lists, ranges, `/step`; day-of-week 0–7, Sunday = 0 or 7) and wins over `interval_secs`. A due schedule
+skips its run while its previous job is unfinished.
+
+### Events (`GET /api/jobs/events`)
+`text/event-stream`. First `event: hello`, then one `event: job` per change, `data:` =
+`{ "event": "created|state|progress|deleted", "id", "type", "state", "progress", "error", "ts" }`.
+`progress` events are sent at most twice a second per job. `?type=` / `?id=` filter. `event: lagged`
+(`{"missed": n}`) means the client fell behind: re-read `GET /api/jobs`. Keep-alive comments every 15 s.
+
+### Ingest compatibility
+The ingest endpoints are unchanged: `/api/ingest/scan`, `/{id}/retry`, `/retry-failed`, `/upload` work as before
+(upload waits for its `ingest` job). Ingest records gain `job_id`. `GET /api/ingest/status`: `queue` = ingest jobs
+queued or running, `active` = running, new `paused`; `last_sidecar_sync`/`last_verify`/`last_backup`/`last_asset_gc`
+= last successful run of those jobs; `pending_hashes`, `problems` as before.
 
 ## Media ingest (server)
 Libraries are no longer scanned. Media enters through the watched ingest directory or the upload

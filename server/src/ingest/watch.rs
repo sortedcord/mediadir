@@ -1,5 +1,5 @@
 //! Watching the ingest dir: inotify (via `notify`) plus periodic polling (network mounts don't
-//! deliver inotify), a settle wait, and a dispatcher with bounded concurrency.
+//! deliver inotify) and a settle wait; settled files become `ingest` jobs (src/jobs).
 
 use super::{ignore_reason, stat_key, Ingest, Pending};
 use notify::{EventKind, RecursiveMode, Watcher};
@@ -9,24 +9,6 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 pub fn start(ing: Arc<Ingest>) {
-    // dispatcher: at most PIPELINE_SLOTS files in the pipeline at once (uploads share the slots)
-    let rx = ing.queue_rx.lock().unwrap().take();
-    if let Some(mut rx) = rx {
-        let me = ing.clone();
-        tokio::spawn(async move {
-            while let Some(path) = rx.recv().await {
-                let Ok(permit) = me.slots.clone().acquire_owned().await else { break };
-                let m = me.clone();
-                tokio::task::spawn_blocking(move || {
-                    m.active.fetch_add(1, Ordering::Relaxed);
-                    m.process_queued(path);
-                    m.active.fetch_sub(1, Ordering::Relaxed);
-                    drop(permit);
-                });
-            }
-        });
-    }
-
     // inotify
     let (tx, mut events) = tokio::sync::mpsc::unbounded_channel::<PathBuf>();
     let handler = move |res: notify::Result<notify::Event>| match res {
@@ -100,10 +82,10 @@ impl Ingest {
         if self.is_seen(&key) {
             return;
         }
-        let mut rt = self.rt.lock().unwrap();
-        if rt.queued.contains(path) {
-            return;
+        if !self.rt.lock().unwrap().pending.contains_key(path) && self.has_job(path) {
+            return; // queued or being processed
         }
+        let mut rt = self.rt.lock().unwrap();
         let p = rt.pending.entry(path.to_path_buf()).or_insert(Pending { size: key.size, mtime: key.mtime, since: Instant::now() });
         if p.size != key.size || p.mtime != key.mtime {
             *p = Pending { size: key.size, mtime: key.mtime, since: Instant::now() };
@@ -149,8 +131,9 @@ impl Ingest {
                 }
                 Some(k) if since.elapsed() >= self.settle => {
                     rt.pending.remove(&path);
-                    if !self.is_seen(&k) && rt.queued.insert(path.clone()) {
-                        let _ = self.queue_tx.send(path);
+                    drop(rt);
+                    if !self.is_seen(&k) {
+                        self.enqueue_path(&path, None);
                     }
                 }
                 Some(_) => {}

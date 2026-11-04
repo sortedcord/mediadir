@@ -23,6 +23,18 @@ tools. Media enters through one of two doors and lives in a private, content-add
 | `ANALYTICS_PLAYBACK_IDLE_SECS` | A playback session closes after this long without `/stream` requests or playback events. | `300` |
 | `ANALYTICS_DEVICE_IDLE_SECS` | A device session closes after this long without any request. | `1800` |
 | `BACKUP_INTERVAL` / `BACKUP_KEEP` | Database backup cadence (seconds) and how many to keep. | `21600` / `14` |
+| `LAZY_HASH_INTERVAL` | Seconds between `hash` schedule runs (full hash of symlinked files still `pending`; an ingest of a symlink also queues one right away). `0` = off. | `60` |
+| `ANALYTICS_ROLLUP_SECS` | Seconds between `analytics_rollup` runs (deletes raw request rows older than `ANALYTICS_RAW_DAYS`). `0` = off. | `3600` |
+| `JOBS_MAX_WORKERS` | Jobs running at the same time, all types together. | `6` |
+| `JOBS_CONCURRENCY` | Per-type limits, `type=n,…` (overrides the defaults `ingest=2,hash=1,verify=1,backup=1,sidecars=1,asset_gc=1,analytics_snapshot=1,analytics_rollup=1`). | — |
+| `JOBS_RETENTION_DAYS` | `done` / `cancelled` jobs (and their logs) are deleted this many days after they finished. | `14` |
+| `JOBS_FAILED_RETENTION_DAYS` | Same for `failed` jobs (never shorter than `JOBS_RETENTION_DAYS`). | `30` |
+| `JOBS_LOG_LINES` | Log lines kept per job (oldest dropped first). | `200` |
+
+The interval variables `SIDECAR_INTERVAL`, `VERIFY_INTERVAL`, `BACKUP_INTERVAL`, `ASSET_GC_INTERVAL`,
+`ANALYTICS_SNAPSHOT_SECS`, `LAZY_HASH_INTERVAL` and `ANALYTICS_ROLLUP_SECS` are the **defaults of the
+[schedules](#jobs-and-schedules)**: they are applied on every start to schedules that were never edited through
+`PUT /api/schedules/{id}`; once a schedule was edited, the database wins.
 
 ## Two ways in
 1. **Ingest directory.** Watched recursively (inotify via `notify`, plus polling). Every regular file,
@@ -58,7 +70,7 @@ tools. Media enters through one of two doors and lives in a private, content-add
 6. Item appears in the API. **No thumbnail or other image is generated at ingest**; images are
    `image` field values attached later by clients ([Image assets](#image-assets)).
 
-Ingest records (`GET /api/ingest`): `{ id, source, size, hash, state, error, item_id, ingested_at }` with
+Ingest records (`GET /api/ingest`): `{ id, source, size, hash, state, error, item_id, ingested_at, job_id }` with
 `state ∈ waiting | hashing | placing | probing | done | duplicate | failed | ignored`.
 `placement` is `move` (regular file/hardlink) or `symlink`. Entries that stay in the ingest dir (duplicates,
 ignored, failed) are tracked by `(device, inode, size, mtime)` in `seen_files`, so they are never processed twice
@@ -179,7 +191,7 @@ hour × route group × route template × status class × device × user), `devic
   overflows, events are dropped and counted (`dropped_events` in the overview). `/api/analytics/*` itself is
   not logged. Unrouted paths are logged as route `(unmatched)`.
 - **Retention.** Each request also increments its hourly aggregate row when it is written. Raw rows older than
-  `ANALYTICS_RAW_DAYS` are deleted hourly (and at startup); aggregates, snapshots, devices and sessions are kept
+  `ANALYTICS_RAW_DAYS` are deleted by the `analytics_rollup` job (hourly by default, and at startup); aggregates, snapshots, devices and sessions are kept
   forever. Percentiles exist only for raw data.
 - **Sessions** live in memory in the writer and are persisted every flush; sessions still open at shutdown are
   closed (at their last activity) on the next start.
@@ -187,6 +199,47 @@ hour × route group × route template × status class × device × user), `devic
   the same `BACKUP_KEEP`. Losing analytics.db loses only history.
 - **Identity.** No auth: `X-MediaDir-Device` / `X-MediaDir-User` headers (or `?device=` / `?user=`), else
   `anon:<client ip>`. The IP is the first `X-Forwarded-For` / `X-Real-IP` value if present, else the socket peer.
+
+## Jobs and schedules
+All background work runs as **jobs** in one persistent queue (main database, tables `jobs`, `job_logs`,
+`schedules`); the API is in [API.md](API.md#jobs). What is *not* a job: watching/polling the ingest dir and the
+settle wait (they only decide when an `ingest` job is queued), and the analytics request log (middleware + writer thread).
+
+- **Queue.** A dispatcher starts due `queued` jobs (`run_at <= now`) in **priority order** (higher first, then
+  oldest), as long as `JOBS_MAX_WORKERS` and the type's limit (`JOBS_CONCURRENCY`) allow. Each job runs on its own
+  thread. Default priorities: `ingest` 10, `backup` 5, `analytics_*` 3, `sidecars` 2, `asset_gc` 1, `hash` 0, `verify` −5.
+- **Cancel / pause.** Cooperative: a running job stops at its next checkpoint (between files, and every MiB while
+  hashing). Pausing parks it (`paused`, not picked up) until resumed; long jobs save a checkpoint so a resumed job
+  continues: `verify` keeps the rest of its re-hash slices and what it found so far, `hash` / `sidecars` keep their
+  progress in the files table anyway. `ingest` jobs cannot be paused while running (cancel instead).
+- **Retries.** A failing job is re-queued with backoff (10 s · 2^attempt, ≤ 1 h) until `max_attempts`
+  (`hash` 3, others 1), then `failed`. `POST /api/jobs/{id}/retry` re-runs a failed/cancelled job from scratch.
+- **Restarts.** Jobs found `running` at startup were interrupted. Per type:
+
+  | type | params | at restart |
+  |---|---|---|
+  | `ingest` | `{path}` — one job per settled ingest-dir entry | re-queued (its interrupted record is marked `failed`; the job makes a fresh record) |
+  | `ingest` | `{upload, staging}` — internal, one per upload | `failed` (staged upload bytes are wiped at startup; the client re-uploads) |
+  | `hash` | `{}` (all pending files) or `{file_id}` | re-queued |
+  | `verify` | `{}` | re-queued; resumes from its checkpoint |
+  | `sidecars` | `{}` | re-queued |
+  | `backup` | `{}` | re-queued (backups are written as `.tmp` and renamed, so no partial backup is ever kept) |
+  | `asset_gc` | `{grace_secs?}` | re-queued |
+  | `analytics_snapshot` | `{}` | re-queued |
+  | `analytics_rollup` | `{}` | re-queued |
+
+  `queued` and `paused` jobs simply stay so.
+- **Ingest records** stay the domain record of an ingest (`GET /api/ingest`); each links its job (`job_id`).
+  `queue` / `active` / `paused` in `GET /api/ingest/status` count `ingest` jobs. A queued ingest job that is
+  cancelled records a `failed` (`cancelled`) ingest record, so the entry is not picked up again until it is retried.
+  Uploads are `ingest` jobs too (they share the ingest limit); the upload request waits for its job.
+- **Schedules** replace the old fixed timers: `sidecars`, `verify`, `backup`, `asset_gc`, `hash`,
+  `analytics_snapshot`, `analytics_rollup` (ids = types). Each has an interval and/or a 5-field UTC cron expression
+  (cron wins), `enabled`, `params`. A due schedule queues a job unless its previous job is still unfinished (then
+  that run is skipped); `hash` also skips when nothing is pending. Edits take effect immediately. A task that ran
+  before keeps its cadence across restarts; a library snapshot is also queued at every start.
+- **Retention.** Hourly, finished jobs are deleted after `JOBS_RETENTION_DAYS` (`failed`: `JOBS_FAILED_RETENTION_DAYS`)
+  with their logs; ingest records keep the (then dangling) `job_id`.
 
 ## Deleting
 `DELETE /api/items/{id}` removes the item (and its children) and removes each of their store entries: a regular
@@ -199,6 +252,7 @@ Libraries are virtual: one per item kind that has items (`movies`, `shows`, `mus
 Creating/deleting libraries is gone (405).
 
 ## Durability
+These tasks are [jobs](#jobs-and-schedules) on schedules.
 - **Database** is the source of truth. Online SQLite backups (`VACUUM INTO`) every `BACKUP_INTERVAL`
   into `DATA_DIR/backups/`, keeping `BACKUP_KEEP`.
 - **Sidecars** — a periodic task (not realtime) writes `<hash>.json` next to each stored file:
