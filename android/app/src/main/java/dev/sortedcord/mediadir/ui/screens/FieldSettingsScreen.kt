@@ -125,7 +125,7 @@ private fun FieldSheet(f: FieldDefinition, isNew: Boolean, onDismiss: () -> Unit
                 Label("Type")
                 Choices(Kinds.FIELD_TYPES, type) { type = it; widget = defaultWidget(it); if (it == "image") placement = "hidden" }
             }
-            if (!f.builtin) {
+            run {
                 Label("Applies to (none = all kinds)")
                 FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                     (Kinds.ITEM_KINDS + "person").forEach { k ->
@@ -163,6 +163,7 @@ private fun FieldSheet(f: FieldDefinition, isNew: Boolean, onDismiss: () -> Unit
                 if (!isNew && placement != "hidden") TextButton(onClick = { placement = "hidden" }) { Text("Hide") }
                 Spacer(Modifier.weight(1f))
                 if (!isNew && !f.builtin) TextButton(onClick = { confirmDelete = true }) { Text("Delete", color = Accent) }
+                if (!isNew && f.builtin) TextButton(onClick = onDelete) { Text("Reset to default", color = Accent) }
             }
         }
     }

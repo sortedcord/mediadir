@@ -121,7 +121,7 @@ class HttpMediaRepository(private val settings: Settings) : MediaRepository {
     override suspend fun fields() = (call("GET", "/api/fields") as? JSONArray ?: JSONArray()).let { a -> with(Json) { a.map(::field) } }
     override suspend fun createField(f: FieldDefinition) { call("POST", "/api/fields", Json.fieldJson(f)) }
     override suspend fun updateField(f: FieldDefinition) {
-        val j = Json.fieldJson(f).apply { remove("key"); remove("type"); if (f.builtin) remove("applies_to") }
+        val j = Json.fieldJson(f).apply { remove("key"); remove("type") }
         call("PUT", "/api/fields/${enc(f.key)}", j)
     }
     override suspend fun deleteField(key: String) { call("DELETE", "/api/fields/${enc(key)}") }
