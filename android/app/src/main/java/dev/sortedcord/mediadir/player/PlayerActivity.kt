@@ -121,9 +121,9 @@ class PlayerActivity : ComponentActivity(), GestureLayer.Listener {
     private var loopB = -1L
     private lateinit var loop: AbLoop
     private lateinit var topBar: LinearLayout
+    private var qualityLabel = "Auto"
     private lateinit var titleView: TextView
     private lateinit var subView: TextView
-    private lateinit var qualityBtn: TextView
     private lateinit var hint: TextView
     private lateinit var audioPane: LinearLayout
     private lateinit var artView: ImageView
@@ -187,6 +187,7 @@ class PlayerActivity : ComponentActivity(), GestureLayer.Listener {
             resizeMode = AspectRatioFrameLayout.RESIZE_MODE_FIT
             useController = false // enabled once the queue is loaded
         }
+        view.findViewById<View>(androidx.media3.ui.R.id.exo_settings)?.setOnClickListener { showSettingsMenu() }
         val content = view.findViewById<View>(androidx.media3.ui.R.id.exo_content_frame)
         zoom = ZoomController(content, view) { filled ->
             view.performHapticFeedback(HapticFeedbackConstants.CLOCK_TICK)
@@ -214,7 +215,7 @@ class PlayerActivity : ComponentActivity(), GestureLayer.Listener {
         seekOverlay = SeekOverlay(this)
         view.overlayFrameLayout?.addView(seekOverlay, FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
 
-        // Top bar: back, title + queue position, quality.
+        // Top bar: back, title + queue position.
         val back = ImageButton(this).apply {
             setImageResource(androidx.media3.ui.R.drawable.exo_ic_chevron_left)
             setColorFilter(Color.WHITE)
@@ -236,24 +237,12 @@ class PlayerActivity : ComponentActivity(), GestureLayer.Listener {
             setPadding(dp(12), 0, dp(12), 0)
             addView(titleView); addView(subView)
         }
-        qualityBtn = TextView(this).apply {
-            text = "Auto"; setTextColor(Color.WHITE); textSize = 13f; typeface = Typeface.DEFAULT_BOLD
-            gravity = Gravity.CENTER
-            setCompoundDrawablesRelativeWithIntrinsicBounds(androidx.media3.ui.R.drawable.exo_ic_settings, 0, 0, 0)
-            compoundDrawablePadding = dp(6)
-            compoundDrawablesRelative[0]?.let { it.setTint(Color.WHITE); it.setBounds(0, 0, dp(18), dp(18)) }
-            setCompoundDrawablesRelative(compoundDrawablesRelative[0], null, null, null)
-            background = GradientDrawable().apply { cornerRadius = 18 * d; setColor(0x55000000) }
-            setPadding(dp(12), dp(7), dp(14), dp(7))
-            setOnClickListener { showSettingsMenu() }
-        }
         topBar = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL
             background = GradientDrawable(GradientDrawable.Orientation.TOP_BOTTOM, intArrayOf(0x99000000.toInt(), 0x00000000))
             setPadding(dp(12), dp(12), dp(12), dp(28))
             addView(back, LinearLayout.LayoutParams(dp(42), dp(42)))
             addView(titles, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
-            addView(qualityBtn)
             visibility = View.GONE
         }
         hint = TextView(this).apply {
@@ -534,8 +523,7 @@ class PlayerActivity : ComponentActivity(), GestureLayer.Listener {
             e.item.subtitle?.takeIf { it.isNotBlank() },
         ).joinToString("  ·  ")
         subView.visibility = if (subView.text.isNullOrEmpty()) View.GONE else View.VISIBLE
-        qualityBtn.text = f?.let { (if (i in manual) "" else "Auto · ") + (if (it.h > 0) "${it.h}p" else it.label.ifBlank { "Audio" }) } ?: "Auto"
-        qualityBtn.visibility = View.VISIBLE
+        qualityLabel = f?.let { (if (i in manual) "" else "Auto · ") + (if (it.h > 0) "${it.h}p" else it.label.ifBlank { "Audio" }) } ?: "Auto"
         if (audio) view.showController()
         if (::playBtn.isInitialized) updateGhostButtons()
     }
@@ -589,18 +577,52 @@ class PlayerActivity : ComponentActivity(), GestureLayer.Listener {
         return head + "\n" + parts.joinToString(" · ")
     }
 
-    /** Gear menu: Quality (when there is a choice) and the whole-item Loop video toggle. */
+    /** Bottom-bar settings menu: speed, audio track, quality (when >1 version), loop video. */
     private fun showSettingsMenu() {
-        val canQuality = (queue.getOrNull(currentIndex())?.files?.size ?: 0) > 1
-        val labels = mutableListOf<String>()
-        if (canQuality) labels += "Quality"
+        val p = player ?: return
+        val pe = queue.getOrNull(currentIndex())
+        val multi = (pe?.files?.size ?: 0) > 1
+        val labels = mutableListOf<String>(); val actions = mutableListOf<() -> Unit>()
+        labels += "Playback speed: " + "%.2fx".format(p.playbackParameters.speed).replace(Regex("0+x"), "x").replace(".x", "x")
+        actions += { showSpeedDialog() }
+        val audioGroups = p.currentTracks.groups.filter { it.type == C.TRACK_TYPE_AUDIO && it.length > 0 }
+        if (audioGroups.size > 1) { labels += "Audio track"; actions += { showAudioDialog() } }
+        labels += "Quality: $qualityLabel" + if (multi) "" else " (single version)"
+        actions += { if (multi) showQualityDialog() else showHint("Only one version available") }
         labels += "Loop video: " + (if (settings.loopVideo) "On" else "Off")
+        actions += { toggleLoopVideo() }
         AlertDialog.Builder(this, android.R.style.Theme_DeviceDefault_Dialog_Alert)
             .setTitle("Settings")
-            .setItems(labels.toTypedArray()) { _, which ->
-                if (canQuality && which == 0) showQualityDialog() else toggleLoopVideo()
-            }
+            .setItems(labels.toTypedArray()) { _, which -> actions[which]() }
             .show()
+    }
+
+    private fun showSpeedDialog() {
+        val p = player ?: return
+        val speeds = floatArrayOf(0.25f, 0.5f, 0.75f, 1f, 1.25f, 1.5f, 2f)
+        val cur = speeds.indexOfFirst { kotlin.math.abs(it - p.playbackParameters.speed) < 0.01f }
+        AlertDialog.Builder(this, android.R.style.Theme_DeviceDefault_Dialog_Alert)
+            .setTitle("Playback speed")
+            .setSingleChoiceItems(speeds.map { if (it == 1f) "Normal" else "${it}x" }.toTypedArray(), cur) { d, w ->
+                p.setPlaybackSpeed(speeds[w]); d.dismiss()
+            }.show()
+    }
+
+    private fun showAudioDialog() {
+        val p = player ?: return
+        val groups = p.currentTracks.groups.filter { it.type == C.TRACK_TYPE_AUDIO && it.length > 0 }
+        val names = groups.mapIndexed { i, g ->
+            val f = g.getTrackFormat(0)
+            f.label ?: f.language?.let { java.util.Locale(it).displayLanguage } ?: "Track ${i + 1}"
+        }
+        val cur = groups.indexOfFirst { it.isSelected }
+        AlertDialog.Builder(this, android.R.style.Theme_DeviceDefault_Dialog_Alert)
+            .setTitle("Audio track")
+            .setSingleChoiceItems(names.toTypedArray(), cur) { d, w ->
+                p.trackSelectionParameters = p.trackSelectionParameters.buildUpon()
+                    .setOverrideForType(androidx.media3.common.TrackSelectionOverride(groups[w].mediaTrackGroup, 0)).build()
+                d.dismiss()
+            }.show()
     }
 
     private fun toggleLoopVideo() {
