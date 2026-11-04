@@ -53,7 +53,7 @@ fun FieldSettingsScreen(nav: Nav, vm: FieldSettingsViewModel = viewModel()) {
     LaunchedEffect(msg) { msg?.let { snack.showSnackbar(it); vm.message.value = null } }
     Scaffold(containerColor = Bg, snackbarHost = { SnackbarHost(snack) },
         topBar = {
-            TopAppBar(title = { Text("Fields & display") }, navigationIcon = { IconButton(onClick = nav::back) { Icon(Icons.AutoMirrored.Filled.ArrowBack, "Back") } },
+            TopAppBar(title = { Text("Library & metadata") }, navigationIcon = { IconButton(onClick = nav::back) { Icon(Icons.AutoMirrored.Filled.ArrowBack, "Back") } },
                 colors = TopAppBarDefaults.topAppBarColors(containerColor = Bg))
         },
         floatingActionButton = { ExtendedFloatingActionButton(onClick = { creating = true }, containerColor = Accent, icon = { Icon(Icons.Default.Add, null) }, text = { Text("Custom field") }) },

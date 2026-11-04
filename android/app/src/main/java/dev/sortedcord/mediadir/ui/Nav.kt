@@ -51,6 +51,7 @@ class Nav(val controller: NavHostController, private val ctx: Context) {
     fun person(id: String) = controller.navigate("person/$id")
     fun search() = controller.navigate(Routes.SEARCH)
     fun settings() = controller.navigate(Routes.SETTINGS)
+    fun settingsPage(name: String) = controller.navigate("settings/$name")
     fun ingest() = controller.navigate("ingest")
     fun fieldSettings() = controller.navigate(Routes.FIELDS)
     fun home() = controller.navigate(Routes.HOME) { popUpTo(0) }
@@ -76,6 +77,10 @@ fun AppNav(ctx: Context) {
             composable(Routes.PERSON, idArg) { PersonScreen(nav, it.arguments!!.getString("id")!!) }
             composable(Routes.SEARCH) { SearchScreen(nav) }
             composable(Routes.SETTINGS) { SettingsScreen(nav) }
+            composable("settings/server") { ServerSettingsScreen(nav) }
+            composable("settings/account") { AccountSettingsScreen(nav) }
+            composable("settings/playback") { PlaybackSettingsScreen(nav) }
+            composable("settings/about") { AboutSettingsScreen(nav) }
             composable("ingest") { IngestScreen(nav) }
             composable(Routes.FIELDS) { FieldSettingsScreen(nav) }
         }

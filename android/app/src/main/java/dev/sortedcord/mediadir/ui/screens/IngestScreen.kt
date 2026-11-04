@@ -54,7 +54,7 @@ fun IngestScreen(nav: Nav) {
         }
     }
     Scaffold(containerColor = Bg, topBar = {
-        TopAppBar(title = { Text("Media ingest & storage") }, navigationIcon = {
+        TopAppBar(title = { Text("Ingest & storage") }, navigationIcon = {
             IconButton(onClick = nav::back) { Icon(Icons.AutoMirrored.Filled.ArrowBack, "Back") }
         })
     }) { pad ->
