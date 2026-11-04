@@ -20,6 +20,7 @@ pub fn routes() -> Router<Shared> {
         .route("/api/items/{id}/credits", axum::routing::post(add_credit))
         .route("/api/items/{id}/credits/{credit_id}", delete(remove_credit))
         .route("/api/items/{id}/playback", get(playback))
+        .route("/api/items/{id}/merge", axum::routing::post(merge))
 }
 
 #[derive(Deserialize, Default)]
@@ -323,6 +324,23 @@ async fn playback(State(st): State<Shared>, Path(id): Path<String>) -> AppResult
             .call(move |r| {
                 let item = r.get_item(&id)?;
                 Views::new(r)?.playback(&item)
+            })
+            .await?,
+    ))
+}
+
+#[derive(Deserialize)]
+struct MergeBody {
+    sources: Vec<String>,
+}
+
+/// `POST /api/items/{id}/merge`: fold other playable items into this one as extra versions.
+async fn merge(State(st): State<Shared>, Path(id): Path<String>, JsonBody(b): JsonBody<MergeBody>) -> AppResult<Json<ItemDetail>> {
+    Ok(Json(
+        st.db
+            .call(move |r| {
+                r.merge_items(&id, &b.sources)?;
+                detail_of(r, &id)
             })
             .await?,
     ))

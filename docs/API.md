@@ -173,6 +173,7 @@ All JSON. Errors: non-2xx with `{ "error": "message" }`.
 | POST | `/api/items/{id}/credits` | `{person_id? , person_name?, role, character?, order?}` (creates person by name if needed) → ItemDetail |
 | DELETE | `/api/items/{id}/credits/{credit_id}` | → ItemDetail |
 | GET | `/api/items/{id}/playback` | `{ "start_index": n, "queue": [ { "item": ItemSummary, "files": [MediaFile] } ] }`. Playable item → itself plus following siblings (episodes/tracks), start_index 0 points at it; container → all playable descendants in natural order. |
+| POST | `/api/items/{id}/merge` | `{ "sources": [item_id, ...] }` → ItemDetail of the target `{id}`. The target keeps all its metadata (title, fields, credits, images, locks, relations). Every media file of each source becomes an additional version of the target; sources' relation memberships move to the target (deduped, the target's own membership wins); ingest records are repointed. Source items are then deleted as DB rows only (their credits/fields/images are discarded; stored files are untouched, they now belong to the target). Atomic. `400` if `sources` is empty/duplicated/contains the target or any item is not a playable leaf (show, season, album, artist...; mixing playable kinds is fine, target kind wins); `404` if any id is unknown. |
 | GET | `/api/people` | `q, role, limit, offset` → `{total, people:[Person]}` |
 | POST | `/api/people` | `{name, sort_name?, bio?, birth_date?}` → PersonDetail |
 | GET | `/api/people/{id}` | PersonDetail |

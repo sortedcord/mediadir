@@ -73,7 +73,7 @@ Add to `claude_desktop_config.json` (Linux: `~/.config/Claude/`, macOS: `~/Libra
 ## Tools
 
 - Discovery: `list_libraries`, `list_items`, `search`, `get_item`
-- Item metadata: `update_item`, `unlock_field`, `set_item_field`, `delete_item_field`
+- Item metadata: `update_item`, `unlock_field`, `merge_items`, `set_item_field`, `delete_item_field`
 - Field definitions: `list_field_defs`, `create_field_def`, `update_field_def`, `delete_field_def`
 - People and credits: `search_people`, `get_person`, `create_person`, `update_person`, `delete_person`, `set_person_field`, `delete_person_field`, `add_credit`, `update_credit`, `remove_credit`
 - Images: `upload_asset`, `get_asset_info`, `asset_url`, `set_image_field`

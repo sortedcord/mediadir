@@ -222,6 +222,16 @@ def delete_item_field(item_id: str, key: str) -> Any:
     return _slim_item(_call("DELETE", f"/api/items/{_enc(item_id)}/fields/{_enc(key)}"), False)
 
 
+@tool()
+def merge_items(target_id: str, source_ids: list[str]) -> Any:
+    """Merge duplicate playable items into one. The target keeps all its metadata; every media file of the
+    sources becomes an additional version (alternate resolution/encoding) of the target, relation memberships
+    move over, and the source items are removed (their own metadata is discarded; files are NOT deleted).
+    All items must be playable leaves (movie/episode/track/music_video/video). Returns the updated target.
+    """
+    return _slim_item(_call("POST", f"/api/items/{_enc(target_id)}/merge", json={"sources": source_ids}), False)
+
+
 # ---------------------------------------------------------------- field definitions
 
 @tool()
