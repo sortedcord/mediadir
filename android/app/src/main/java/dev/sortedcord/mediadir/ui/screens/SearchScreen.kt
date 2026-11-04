@@ -29,6 +29,12 @@ class SearchViewModel : ScrollHolder() {
     val query = MutableStateFlow("")
     val state = MutableStateFlow<UiState<SearchResult>?>(null)
     private var job: Job? = null
+    /** Re-run the current query without a spinner (keeps the scroll position). */
+    fun refresh() {
+        val q = query.value.trim(); if (q.isBlank()) return
+        job?.cancel()
+        job = viewModelScope.launch { runCatching { Graph.repo.search(q) }.onSuccess { state.value = UiState.Ready(it) } }
+    }
     fun setQuery(q: String) {
         query.value = q; job?.cancel()
         if (q.isBlank()) { state.value = null; return }
@@ -48,8 +54,10 @@ fun SearchScreen(nav: Nav, vm: SearchViewModel = viewModel()) {
     val grid = vm.gridState("main")
     OnTabReselect(Routes.SEARCH) { grid.animateScrollToItem(0) }
     LaunchedEffect(Unit) { runCatching { focus.requestFocus() } }
-    Scaffold(containerColor = Bg, topBar = {
-        TopAppBar(
+    val snack = remember { SnackbarHostState() }
+    MergeHost(vm, snack, onMerged = vm::refresh)
+    Scaffold(containerColor = Bg, snackbarHost = { SnackbarHost(snack) }, topBar = {
+        if (vm.selection.active) SelectionTopBar(vm) else TopAppBar(
             title = {
                 TextField(q, vm::setQuery, placeholder = { Text("Search titles and people") }, singleLine = true,
                     colors = TextFieldDefaults.colors(focusedContainerColor = Bg, unfocusedContainerColor = Bg),
@@ -73,7 +81,7 @@ fun SearchScreen(nav: Nav, vm: SearchViewModel = viewModel()) {
                         }
                     }
                     if (r.items.isNotEmpty()) item(key = "items_h", span = { GridItemSpan(maxLineSpan) }) { Text("Items", style = MaterialTheme.typography.titleMedium) }
-                    items(r.items, key = { it.id }) { MediaCard(it, onClick = nav::open) }
+                    items(r.items, key = { it.id }) { MediaCard(it, selection = vm.selection, onClick = nav::open) }
                     if (r.items.isEmpty() && r.people.isEmpty()) item(key = "none", span = { GridItemSpan(maxLineSpan) }) { Text("No results", color = Muted) }
                 }
             }

@@ -1,5 +1,7 @@
 package dev.sortedcord.mediadir.ui
 
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.setValue
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import kotlinx.coroutines.Job
@@ -19,6 +21,25 @@ open class ScrollHolder : ViewModel() {
     private val grids = HashMap<String, androidx.compose.foundation.lazy.grid.LazyGridState>()
     fun listState(key: String) = lists.getOrPut(key) { androidx.compose.foundation.lazy.LazyListState() }
     fun gridState(key: String) = grids.getOrPut(key) { androidx.compose.foundation.lazy.grid.LazyGridState() }
+
+    // multi-select + merge (selection survives scroll and recomposition; first selected = merge target)
+    val selection = dev.sortedcord.mediadir.ui.components.SelectionState()
+    var confirmMerge by androidx.compose.runtime.mutableStateOf(false)
+    var merging by androidx.compose.runtime.mutableStateOf(false)
+    var mergeMessage by androidx.compose.runtime.mutableStateOf<String?>(null)
+
+    /** Merge the selection into its first item, then run [onDone] (refresh) and leave selection mode. */
+    fun merge(onDone: () -> Unit) {
+        val items = selection.items.toList()
+        if (items.size < 2 || merging) return
+        merging = true
+        viewModelScope.launch {
+            runCatching { dev.sortedcord.mediadir.data.Graph.repo.mergeItems(items.first().id, items.drop(1).map { it.id }) }
+                .onSuccess { mergeMessage = "Merged ${items.size} items into '${items.first().title}'"; selection.clear(); onDone() }
+                .onFailure { mergeMessage = "Merge failed: ${it.message ?: it.javaClass.simpleName}" }
+            merging = false
+        }
+    }
 }
 
 /** ViewModel holding a single loadable UiState. */

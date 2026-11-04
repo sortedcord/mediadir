@@ -46,10 +46,11 @@ fun PersonScreen(nav: Nav, id: String, vm: PersonViewModel = viewModel(key = "pe
     var editing by remember { mutableStateOf(false) }
     val snack = remember { SnackbarHostState() }
     LaunchedEffect(msg) { msg?.let { snack.showSnackbar(it); vm.message.value = null } }
+    MergeHost(vm, snack, onMerged = { vm.load(showSpinner = false) })
     Scaffold(
         containerColor = Bg, snackbarHost = { SnackbarHost(snack) },
         topBar = {
-            TopAppBar(title = {}, navigationIcon = { IconButton(onClick = nav::back) { Icon(Icons.AutoMirrored.Filled.ArrowBack, "Back") } },
+            if (vm.selection.active) SelectionTopBar(vm) else TopAppBar(title = {}, navigationIcon = { IconButton(onClick = nav::back) { Icon(Icons.AutoMirrored.Filled.ArrowBack, "Back") } },
                 actions = { if (state is UiState.Ready) IconButton(onClick = { vm.loadFieldDefs(); editing = true }) { Icon(Icons.Default.Edit, "Edit") } },
                 colors = TopAppBarDefaults.topAppBarColors(containerColor = Bg))
         },
@@ -78,7 +79,7 @@ fun PersonScreen(nav: Nav, id: String, vm: PersonViewModel = viewModel(key = "pe
                             LazyRow(state = vm.listState("role_" + role), contentPadding = PaddingValues(horizontal = 16.dp), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
                                 items(credits, key = { it.id }) { c ->
                                     Column(Modifier.width(cardWidth(c.item.aspect))) {
-                                        MediaCard(c.item, onClick = nav::open)
+                                        MediaCard(c.item, selection = vm.selection, onClick = nav::open)
                                         c.character?.let { Text("as $it", color = Muted, fontSize = 11.sp, maxLines = 1) }
                                     }
                                 }

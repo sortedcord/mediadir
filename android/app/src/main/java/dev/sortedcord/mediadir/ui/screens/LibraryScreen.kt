@@ -80,10 +80,12 @@ fun LibraryScreen(nav: Nav, libraryId: String, vm: LibraryViewModel = viewModel(
     val sort by vm.sort.collectAsStateWithLifecycle()
     var menu by remember { mutableStateOf(false) }
     val title = ((state as? UiState.Ready)?.data?.library?.name) ?: "Library"
+    val snack = remember { SnackbarHostState() }
+    MergeHost(vm, snack, onMerged = vm::refresh)
     Scaffold(
-        containerColor = Bg,
+        containerColor = Bg, snackbarHost = { SnackbarHost(snack) },
         topBar = {
-            TopAppBar(
+            if (vm.selection.active) SelectionTopBar(vm) else TopAppBar(
                 title = { Text(title) },
                 navigationIcon = { IconButton(onClick = nav::back) { Icon(Icons.AutoMirrored.Filled.ArrowBack, "Back") } },
                 actions = {
@@ -112,7 +114,7 @@ fun LibraryScreen(nav: Nav, libraryId: String, vm: LibraryViewModel = viewModel(
                     GridCells.Adaptive(min), state = grid, contentPadding = PaddingValues(16.dp),
                     horizontalArrangement = Arrangement.spacedBy(12.dp), verticalArrangement = Arrangement.spacedBy(16.dp),
                 ) {
-                    items(data.items, key = { it.id }) { MediaCard(it, onClick = nav::open) }
+                    items(data.items, key = { it.id }) { MediaCard(it, selection = vm.selection, onClick = nav::open) }
                     if (data.loadingMore) item(span = { GridItemSpan(maxLineSpan) }) {
                         Box(Modifier.fillMaxWidth(), contentAlignment = Alignment.Center) { CircularProgressIndicator(color = Accent) }
                     }
