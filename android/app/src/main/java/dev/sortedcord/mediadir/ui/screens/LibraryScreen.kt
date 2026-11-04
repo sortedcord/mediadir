@@ -27,7 +27,7 @@ import kotlinx.coroutines.launch
 
 data class LibraryData(val library: Library?, val items: List<ItemSummary>, val total: Int, val loadingMore: Boolean)
 
-class LibraryViewModel(private val libraryId: String) : ViewModel() {
+class LibraryViewModel(private val libraryId: String) : ScrollHolder() {
     val state = MutableStateFlow<UiState<LibraryData>>(UiState.Loading)
     val sort = MutableStateFlow("title")
     private var job: Job? = null
@@ -35,16 +35,26 @@ class LibraryViewModel(private val libraryId: String) : ViewModel() {
 
     init { reload() }
 
-    fun setSort(s: String) { if (s != sort.value) { sort.value = s; reload() } }
+    fun setSort(s: String) { if (s != sort.value) { sort.value = s; viewModelScope.launch { gridState("main").scrollToItem(0) }; reload() } }
 
-    fun reload() {
-        job?.cancel(); state.value = UiState.Loading
+    fun reload() = fetch(refresh = false)
+
+    /** Refresh in place: keeps showing (and the scroll position of) the current items. */
+    fun refresh() = fetch(refresh = true)
+
+    private fun fetch(refresh: Boolean) {
+        val cur = (state.value as? UiState.Ready)?.data
+        if (!refresh || cur == null) state.value = UiState.Loading
+        job?.cancel()
         job = viewModelScope.launch {
-            state.value = runCatching {
+            val r = runCatching {
                 val lib = runCatching { Graph.repo.libraries().firstOrNull { it.id == libraryId } }.getOrNull()
-                val p = Graph.repo.items(libraryId = libraryId, sort = sort.value, order = order(), limit = pageSize, offset = 0)
-                LibraryData(lib, p.items, p.total, false)
-            }.fold({ UiState.Ready(it) }, { UiState.Error(it.message ?: "Error") })
+                val n = if (refresh && cur != null) maxOf(pageSize, cur.items.size) else pageSize
+                val p = Graph.repo.items(libraryId = libraryId, sort = sort.value, order = order(), limit = n, offset = 0)
+                LibraryData(lib ?: cur?.library, p.items, p.total, false)
+            }
+            if (refresh && cur != null && r.isFailure) { state.value = UiState.Ready(cur.copy(loadingMore = false)); return@launch }
+            state.value = r.fold({ UiState.Ready(it) }, { UiState.Error(it.message ?: "Error") })
         }
     }
 
@@ -66,7 +76,7 @@ class LibraryViewModel(private val libraryId: String) : ViewModel() {
 @Composable
 fun LibraryScreen(nav: Nav, libraryId: String, vm: LibraryViewModel = viewModel(key = "lib$libraryId") { LibraryViewModel(libraryId) }) {
     val state by vm.state.collectAsStateWithLifecycle()
-    LifecycleEventEffect(Lifecycle.Event.ON_RESUME) { vm.reload() }
+    LifecycleEventEffect(Lifecycle.Event.ON_RESUME) { vm.refresh() }
     val sort by vm.sort.collectAsStateWithLifecycle()
     var menu by remember { mutableStateOf(false) }
     val title = ((state as? UiState.Ready)?.data?.library?.name) ?: "Library"
@@ -94,7 +104,7 @@ fun LibraryScreen(nav: Nav, libraryId: String, vm: LibraryViewModel = viewModel(
             StateContent(state, onRetry = vm::reload) { data ->
                 val aspect = data.items.firstOrNull()?.aspect ?: "landscape"
                 val min = when (aspect) { "poster" -> 110.dp; "square" -> 140.dp; else -> 170.dp }
-                val grid = rememberLazyGridState()
+                val grid = vm.gridState("main")
                 val nearEnd by remember { derivedStateOf { grid.layoutInfo.visibleItemsInfo.lastOrNull()?.index?.let { it >= data.items.size - 12 } ?: false } }
                 LaunchedEffect(nearEnd, data.items.size) { if (nearEnd) vm.loadMore() }
                 if (data.items.isEmpty()) Text("Nothing here yet.", color = Muted, modifier = Modifier.padding(16.dp))

@@ -61,13 +61,13 @@ fun HomeScreen(nav: Nav, vm: HomeViewModel = viewModel()) {
         Box(Modifier.padding(pad)) {
             StateContent(state, onRetry = { vm.load() }) { rows ->
                 if (rows.isEmpty()) Text("No libraries on this server.", color = Muted, modifier = Modifier.padding(16.dp))
-                LazyColumn(contentPadding = PaddingValues(bottom = 24.dp)) {
+                LazyColumn(state = vm.listState("main"), contentPadding = PaddingValues(bottom = 24.dp)) {
                     items(rows, key = { it.library.id }) { row ->
                         SectionTitle(row.library.name + if (row.library.scanning) "  · scanning…" else "") {
                             TextButton(onClick = { nav.library(row.library.id) }) { Text("See all (${row.total})") }
                         }
                         val aspect = row.items.firstOrNull()?.aspect ?: "landscape"
-                        LazyRow(contentPadding = PaddingValues(horizontal = 16.dp), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                        LazyRow(state = vm.listState("row_" + row.library.id), contentPadding = PaddingValues(horizontal = 16.dp), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
                             items(row.items, key = { it.id }) { item ->
                                 MediaCard(item, Modifier.width(cardWidth(item.aspect.ifBlank { aspect })), onClick = nav::open)
                             }

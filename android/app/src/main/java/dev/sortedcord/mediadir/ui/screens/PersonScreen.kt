@@ -56,8 +56,8 @@ fun PersonScreen(nav: Nav, id: String, vm: PersonViewModel = viewModel(key = "pe
     ) { pad ->
         Box(Modifier.padding(pad)) {
             StateContent(state, onRetry = { vm.load() }) { p ->
-                LazyColumn(contentPadding = PaddingValues(bottom = 24.dp)) {
-                    item {
+                LazyColumn(state = vm.listState("main"), contentPadding = PaddingValues(bottom = 24.dp)) {
+                    item(key = "header") {
                         Column(Modifier.fillMaxWidth().padding(16.dp), horizontalAlignment = Alignment.CenterHorizontally) {
                             Avatar(p.person.id, p.person.name, 140.dp, hash = ImagePolicy.person(p.fields), images = p.person.images)
                             Spacer(Modifier.height(12.dp))
@@ -68,14 +68,14 @@ fun PersonScreen(nav: Nav, id: String, vm: PersonViewModel = viewModel(key = "pe
                         }
                     }
                     p.bio?.takeIf { it.isNotBlank() }?.let { bio ->
-                        item { Text(bio, color = Color(0xFFD6D6DE), fontSize = 14.sp, lineHeight = 20.sp, modifier = Modifier.padding(horizontal = 16.dp)) }
+                        item(key = "bio") { Text(bio, color = Color(0xFFD6D6DE), fontSize = 14.sp, lineHeight = 20.sp, modifier = Modifier.padding(horizontal = 16.dp)) }
                     }
-                    item { DetailBlocks(p.display, nav::person) }
+                    item(key = "details") { DetailBlocks(p.display, nav::person) }
                     val groups = p.credits.groupBy { it.role }
                     groups.forEach { (role, credits) ->
                         item(key = "role_$role") {
                             SectionTitle(role.titleCase() + " (${credits.size})")
-                            LazyRow(contentPadding = PaddingValues(horizontal = 16.dp), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                            LazyRow(state = vm.listState("role_" + role), contentPadding = PaddingValues(horizontal = 16.dp), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
                                 items(credits, key = { it.id }) { c ->
                                     Column(Modifier.width(cardWidth(c.item.aspect))) {
                                         MediaCard(c.item, onClick = nav::open)

@@ -25,7 +25,7 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.launch
 
-class SearchViewModel : ViewModel() {
+class SearchViewModel : ScrollHolder() {
     val query = MutableStateFlow("")
     val state = MutableStateFlow<UiState<SearchResult>?>(null)
     private var job: Job? = null
@@ -60,20 +60,20 @@ fun SearchScreen(nav: Nav, vm: SearchViewModel = viewModel()) {
         Box(Modifier.padding(pad)) {
             val s = state ?: return@Box
             StateContent(s, onRetry = { vm.setQuery(q) }) { r ->
-                LazyVerticalGrid(GridCells.Adaptive(160.dp), contentPadding = PaddingValues(16.dp),
+                LazyVerticalGrid(GridCells.Adaptive(160.dp), state = vm.gridState("main"), contentPadding = PaddingValues(16.dp),
                     horizontalArrangement = Arrangement.spacedBy(12.dp), verticalArrangement = Arrangement.spacedBy(16.dp)) {
-                    if (r.people.isNotEmpty()) item(span = { GridItemSpan(maxLineSpan) }) {
+                    if (r.people.isNotEmpty()) item(key = "people", span = { GridItemSpan(maxLineSpan) }) {
                         Column {
                             Text("People", style = MaterialTheme.typography.titleMedium)
                             Spacer(Modifier.height(8.dp))
-                            LazyRow(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                            LazyRow(state = vm.listState("people"), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
                                 items(r.people, key = { it.id }) { p -> PersonTile(p.id, p.name, "${p.creditCount} credits", nav::person, images = p.images) }
                             }
                         }
                     }
-                    if (r.items.isNotEmpty()) item(span = { GridItemSpan(maxLineSpan) }) { Text("Items", style = MaterialTheme.typography.titleMedium) }
+                    if (r.items.isNotEmpty()) item(key = "items_h", span = { GridItemSpan(maxLineSpan) }) { Text("Items", style = MaterialTheme.typography.titleMedium) }
                     items(r.items, key = { it.id }) { MediaCard(it, onClick = nav::open) }
-                    if (r.items.isEmpty() && r.people.isEmpty()) item(span = { GridItemSpan(maxLineSpan) }) { Text("No results", color = Muted) }
+                    if (r.items.isEmpty() && r.people.isEmpty()) item(key = "none", span = { GridItemSpan(maxLineSpan) }) { Text("No results", color = Muted) }
                 }
             }
         }

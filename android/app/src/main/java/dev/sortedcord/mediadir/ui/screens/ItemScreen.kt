@@ -131,8 +131,8 @@ private fun ItemContent(nav: Nav, vm: ItemViewModel, d: ItemDetail, resumeTick: 
     val settings = Graph.settings
     val header = d.display.filter { it.placement == "header" && it.type != "image" }
     val pos = remember(resumeTick, s.id) { settings.position(s.id) }
-    LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(bottom = bottom + 24.dp)) {
-        item {
+    LazyColumn(Modifier.fillMaxSize(), state = vm.listState("main"), contentPadding = PaddingValues(bottom = bottom + 24.dp)) {
+        item(key = "hero") {
             val own = remember(d) { ImagePolicy.card(d.fields) ?: ImagePolicy.card(s.imageValues) }
             val explicitBackdrop = remember(d) { ImagePolicy.backdropOnly(d.fields) }
             // Parent-chain fallback only when this item has no image of its own.
@@ -154,7 +154,7 @@ private fun ItemContent(nav: Nav, vm: ItemViewModel, d: ItemDetail, resumeTick: 
                 }
             }
         }
-        item {
+        item(key = "info") {
             Column(Modifier.padding(horizontal = 16.dp)) {
                 if (d.breadcrumbs.isNotEmpty()) Row {
                     d.breadcrumbs.forEachIndexed { i, b ->
@@ -177,7 +177,7 @@ private fun ItemContent(nav: Nav, vm: ItemViewModel, d: ItemDetail, resumeTick: 
                 Spacer(Modifier.height(8.dp))
             }
         }
-        if (d.files.isNotEmpty()) item {
+        if (d.files.isNotEmpty()) item(key = "files") {
             Column(Modifier.padding(horizontal = 16.dp)) {
                 Text("Files & versions", style = MaterialTheme.typography.titleMedium)
                 d.files.forEach { file ->
@@ -191,27 +191,27 @@ private fun ItemContent(nav: Nav, vm: ItemViewModel, d: ItemDetail, resumeTick: 
                 }
             }
         }
-        item { DetailBlocks(d.display, nav::person) }
-        if (d.extras.isNotEmpty()) item {
+        item(key = "details") { DetailBlocks(d.display, nav::person) }
+        if (d.extras.isNotEmpty()) item(key = "extras") {
             SectionTitle("Extras")
-            LazyRow(contentPadding = PaddingValues(horizontal = 16.dp), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+            LazyRow(state = vm.listState("extras"), contentPadding = PaddingValues(horizontal = 16.dp), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
                 items(d.extras, key = { it.id }) { x -> MediaCard(x, Modifier.width(200.dp), onClick = { nav.play(it.id) }) }
             }
         }
-        if (d.credits.isNotEmpty()) item {
+        if (d.credits.isNotEmpty()) item(key = "credits") {
             SectionTitle("Cast & crew")
-            LazyRow(contentPadding = PaddingValues(horizontal = 16.dp), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+            LazyRow(state = vm.listState("credits"), contentPadding = PaddingValues(horizontal = 16.dp), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
                 items(d.credits, key = { it.id }) { c ->
                     PersonTile(c.person.id, c.person.name, c.character ?: c.role.titleCase(), nav::person, images = c.person.images)
                 }
             }
         }
-        relationsSection(nav, d)
+        relationsSection(nav, vm, d)
         children(nav, vm, d)
     }
 }
 
-private fun LazyListScope.relationsSection(nav: Nav, d: ItemDetail) {
+private fun LazyListScope.relationsSection(nav: Nav, vm: ItemViewModel, d: ItemDetail) {
     if (d.relations.isEmpty()) return
     item(key = "relations") {
         val details by produceState<List<RelationDetail>>(emptyList(), d.relations) {
@@ -221,7 +221,7 @@ private fun LazyListScope.relationsSection(nav: Nav, d: ItemDetail) {
             details.groupBy { it.summary.type }.forEach { (type, rels) ->
                 rels.forEach { r ->
                     SectionTitle((r.summary.name ?: type.replace('_', ' ').titleCase()).let { if (r.summary.name != null) "$it · ${type.replace('_', ' ')}" else it })
-                    LazyRow(contentPadding = PaddingValues(horizontal = 16.dp), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                    LazyRow(state = vm.listState("rel_" + r.summary.id), contentPadding = PaddingValues(horizontal = 16.dp), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
                         items(r.members, key = { it.itemId }) { m ->
                             Column(Modifier.width(cardWidth(m.item.aspect))) {
                                 MediaCard(m.item, onClick = { nav.item(it.id) })
@@ -241,11 +241,11 @@ private fun LazyListScope.children(nav: Nav, vm: ItemViewModel, d: ItemDetail) {
     if (kids.isEmpty()) return
     val kind = kids.first().kind
     when {
-        kind == "season" -> item {
+        kind == "season" -> item(key = "seasons") {
             val sel by vm.season.collectAsStateWithLifecycle()
             LaunchedEffect(d.summary.id) { if (vm.season.value == null) vm.selectSeason(kids.first().id) }
             SectionTitle("Seasons")
-            LazyRow(contentPadding = PaddingValues(horizontal = 16.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            LazyRow(state = vm.listState("seasons"), contentPadding = PaddingValues(horizontal = 16.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 items(kids, key = { it.id }) { k ->
                     FilterChip(selected = sel?.first == k.id, onClick = { vm.selectSeason(k.id) }, label = { Text(k.title) })
                 }
@@ -258,17 +258,17 @@ private fun LazyListScope.children(nav: Nav, vm: ItemViewModel, d: ItemDetail) {
             TextButton(onClick = { sel?.first?.let(nav::item) }, modifier = Modifier.padding(horizontal = 8.dp)) { Text("Open season") }
         }
         kind == "episode" -> {
-            item { SectionTitle("Episodes") }
+            item(key = "h_eps") { SectionTitle("Episodes") }
             items(kids, key = { it.id }) { EpisodeRow(it, nav) }
         }
         kind == "track" -> {
-            item { SectionTitle("Tracks") }
+            item(key = "h_tracks") { SectionTitle("Tracks") }
             items(kids, key = { it.id }) { TrackRow(it, nav) }
         }
         else -> {
-            item { SectionTitle(when (kind) { "album" -> "Albums"; else -> "Contents" }) }
+            item(key = "h_contents") { SectionTitle(when (kind) { "album" -> "Albums"; else -> "Contents" }) }
             val perRow = when (kids.first().aspect) { "landscape" -> 2; else -> 3 }
-            items(kids.chunked(perRow)) { row ->
+            items(kids.chunked(perRow), key = { row -> row.first().id }) { row ->
                 Row(Modifier.padding(horizontal = 16.dp, vertical = 6.dp), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
                     row.forEach { MediaCard(it, Modifier.weight(1f), onClick = nav::open) }
                     repeat(perRow - row.size) { Spacer(Modifier.weight(1f)) }

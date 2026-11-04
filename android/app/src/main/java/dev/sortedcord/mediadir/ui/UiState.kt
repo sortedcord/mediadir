@@ -13,8 +13,16 @@ sealed interface UiState<out T> {
     data class Ready<T>(val data: T) : UiState<T>
 }
 
+/** Scroll positions hoisted into the ViewModel so they survive navigation and state swaps (Loading/Ready). */
+open class ScrollHolder : ViewModel() {
+    private val lists = HashMap<String, androidx.compose.foundation.lazy.LazyListState>()
+    private val grids = HashMap<String, androidx.compose.foundation.lazy.grid.LazyGridState>()
+    fun listState(key: String) = lists.getOrPut(key) { androidx.compose.foundation.lazy.LazyListState() }
+    fun gridState(key: String) = grids.getOrPut(key) { androidx.compose.foundation.lazy.grid.LazyGridState() }
+}
+
 /** ViewModel holding a single loadable UiState. */
-abstract class LoadViewModel<T> : ViewModel() {
+abstract class LoadViewModel<T> : ScrollHolder() {
     protected val _state = MutableStateFlow<UiState<T>>(UiState.Loading)
     val state: StateFlow<UiState<T>> = _state
     private var job: Job? = null
