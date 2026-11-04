@@ -197,7 +197,7 @@ class PlayerActivity : ComponentActivity(), GestureLayer.Listener {
         hq = HqFrameView(this) { content.scaleX }
         (content as ViewGroup).addView(hq, FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
         zoom.onTransform = { hq.invalidate() }
-        loop = AbLoop(content, ::newPlayer, { player }, { player?.let { p -> mediaItem(p.currentMediaItemIndex) } }) { updateGhostButtons(); hqOnStateChange() }
+        loop = AbLoop(content, { newPlayer(it) }, { player }, { player?.let { p -> mediaItem(p.currentMediaItemIndex) } }) { updateGhostButtons(); hqOnStateChange() }
 
         // Audio-only pane (artwork + titles), below the controller.
         artView = ImageView(this).apply { scaleType = ImageView.ScaleType.CENTER_CROP; setBackgroundColor(0xFF1A1A22.toInt()) }
@@ -852,19 +852,23 @@ class PlayerActivity : ComponentActivity(), GestureLayer.Listener {
         settings.savePosition(e.item.id, if (nearEnd) 0 else p.currentPosition)
     }
 
-    private fun newPlayer(): ExoPlayer {
+    private fun newPlayer(shadow: Boolean = false): ExoPlayer {
         val renderers = DefaultRenderersFactory(this)
             .setExtensionRendererMode(DefaultRenderersFactory.EXTENSION_RENDERER_MODE_ON)
             .setEnableDecoderFallback(true)
         val http = DefaultHttpDataSource.Factory()
             .setConnectTimeoutMs(10_000).setReadTimeoutMs(30_000).setAllowCrossProtocolRedirects(true)
             .setDefaultRequestProperties(settings.identityHeaders())
-        // Big buffers: high-bitrate originals over LAN.
+        // Buffers live on the Java heap (256MB cap), so bound them by BYTES, not time:
+        // at ~143 Mbps, 120s of buffer would be >2GB. Back buffer is kept tiny (it counts
+        // against the allocator too); seeking back is served from the disk cache.
+        val bytes = if (shadow) 16 * 1024 * 1024 else 48 * 1024 * 1024
         val load = DefaultLoadControl.Builder()
-            .setBufferDurationsMs(15_000, 120_000, 1_500, 3_000)
-            .setTargetBufferBytes(256 * 1024 * 1024)
+            .setAllocator(androidx.media3.exoplayer.upstream.DefaultAllocator(true, C.DEFAULT_BUFFER_SEGMENT_SIZE))
+            .setBufferDurationsMs(if (shadow) 2_000 else 10_000, if (shadow) 8_000 else 60_000, 1_500, 3_000)
+            .setTargetBufferBytes(bytes)
             .setPrioritizeTimeOverSizeThresholds(false)
-            .setBackBuffer(60_000, true) // keep already-downloaded data so seeking back doesn't refetch
+            .setBackBuffer(if (shadow) 0 else 2_000, false)
             .build()
         val selector = DefaultTrackSelector(this).apply {
             setParameters(buildUponParameters().setExceedRendererCapabilitiesIfNecessary(true)
