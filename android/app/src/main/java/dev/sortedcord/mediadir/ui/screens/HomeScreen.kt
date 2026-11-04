@@ -45,15 +45,13 @@ class HomeViewModel : LoadViewModel<List<HomeRow>>() {
 fun HomeScreen(nav: Nav, vm: HomeViewModel = viewModel()) {
     val state by vm.state.collectAsStateWithLifecycle()
     LifecycleEventEffect(Lifecycle.Event.ON_RESUME) { vm.load(showSpinner = false) }
+    val homeList = vm.listState("main")
+    OnTabReselect(Routes.HOME) { homeList.animateScrollToItem(0) }
     Scaffold(
         containerColor = Bg,
         topBar = {
             TopAppBar(
                 title = { Text("MediaDir", fontWeight = FontWeight.Bold) },
-                actions = {
-                    IconButton(onClick = nav::search) { Icon(Icons.Default.Search, "Search") }
-                    IconButton(onClick = nav::settings) { Icon(Icons.Default.Settings, "Settings") }
-                },
                 colors = TopAppBarDefaults.topAppBarColors(containerColor = Bg),
             )
         },

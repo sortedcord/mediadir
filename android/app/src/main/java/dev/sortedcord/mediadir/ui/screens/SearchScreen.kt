@@ -45,10 +45,11 @@ fun SearchScreen(nav: Nav, vm: SearchViewModel = viewModel()) {
     val q by vm.query.collectAsStateWithLifecycle()
     val state by vm.state.collectAsStateWithLifecycle()
     val focus = remember { FocusRequester() }
+    val grid = vm.gridState("main")
+    OnTabReselect(Routes.SEARCH) { grid.animateScrollToItem(0) }
     LaunchedEffect(Unit) { runCatching { focus.requestFocus() } }
     Scaffold(containerColor = Bg, topBar = {
         TopAppBar(
-            navigationIcon = { IconButton(onClick = nav::back) { Icon(Icons.AutoMirrored.Filled.ArrowBack, "Back") } },
             title = {
                 TextField(q, vm::setQuery, placeholder = { Text("Search titles and people") }, singleLine = true,
                     colors = TextFieldDefaults.colors(focusedContainerColor = Bg, unfocusedContainerColor = Bg),

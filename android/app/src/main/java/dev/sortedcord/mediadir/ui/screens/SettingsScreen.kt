@@ -9,6 +9,7 @@ import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
@@ -22,17 +23,19 @@ import kotlinx.coroutines.launch
 fun SettingsScreen(nav: Nav) {
     val s = Graph.settings
     val scope = rememberCoroutineScope()
-    var url by remember { mutableStateOf(s.server) }
+    var url by rememberSaveable { mutableStateOf(s.server) }
     var quality by remember { mutableIntStateOf(s.quality) }
     var hq by remember { mutableStateOf(s.hqPauseFrame) }
     var hqDelay by remember { mutableIntStateOf(s.hqPauseDelayMs) }
-    var userName by remember { mutableStateOf(s.userName) }
+    var userName by rememberSaveable { mutableStateOf(s.userName) }
+    val scroll = rememberScrollState()
+    OnTabReselect(Routes.SETTINGS) { scroll.animateScrollTo(0) }
     var status by remember { mutableStateOf<String?>(null) }
     Scaffold(containerColor = Bg, topBar = {
-        TopAppBar(title = { Text("Settings") }, navigationIcon = { IconButton(onClick = nav::back) { Icon(Icons.AutoMirrored.Filled.ArrowBack, "Back") } },
+        TopAppBar(title = { Text("Settings") },
             colors = TopAppBarDefaults.topAppBarColors(containerColor = Bg))
     }) { pad ->
-        Column(Modifier.padding(pad).padding(16.dp).verticalScroll(rememberScrollState())) {
+        Column(Modifier.padding(pad).padding(16.dp).verticalScroll(scroll)) {
             Text("Server", style = MaterialTheme.typography.titleMedium)
             OutlinedTextField(url, { url = it }, label = { Text("Server URL") }, singleLine = true, modifier = Modifier.fillMaxWidth())
             Row {
