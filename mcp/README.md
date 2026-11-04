@@ -79,6 +79,8 @@ Add to `claude_desktop_config.json` (Linux: `~/.config/Claude/`, macOS: `~/Libra
 - Images: `upload_asset`, `get_asset_info`, `asset_url`, `set_image_field`
 - Relations: `list_relation_types`, `list_relations`, `get_relation`, `get_item_relations`, `create_relation`, `update_relation`, `delete_relation`, `add_relation_member`, `remove_relation_member`, `replace_relation_members`
 - Ingest (read-only): `ingest_status`
+- Jobs: `list_jobs`, `get_job` (with logs), `create_job`, `cancel_job`, `pause_job`, `resume_job`, `retry_job`, `delete_job` (finished job records only), `job_stats`, `wait_for_job` (polls until done/failed/cancelled)
+- Schedules: `list_schedules`, `get_schedule`, `update_schedule`, `run_schedule`
 
 Results are compact JSON text; API errors come back as tool errors with the server's message.
 

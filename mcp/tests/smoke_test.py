@@ -44,7 +44,8 @@ async def main():
                 if httpx.get(URL + "/api/health", timeout=1).json().get("ok"):
                     break
             except Exception:
-                time.sleep(0.5)
+                pass
+            time.sleep(0.5)
         else:
             raise RuntimeError("disposable server did not start")
         clip = f"{tmp}/clip.mkv"
@@ -209,6 +210,55 @@ async def main():
 
             st, e = await call("ingest_status", records=True)
             ok("ingest_status", st and "status" in st and len(st["records"]) >= 1, (st, e))
+
+            # ---- jobs and schedules
+            ok("job tools listed", {"list_jobs", "get_job", "create_job", "cancel_job", "pause_job", "resume_job",
+                                    "retry_job", "delete_job", "job_stats", "wait_for_job", "list_schedules",
+                                    "get_schedule", "update_schedule", "run_schedule"} <= tools)
+            sch, e = await call("list_schedules")
+            ok("list_schedules", sch and any(x["id"] == "verify" for x in sch), (sch, e))
+            sc, e = await call("update_schedule", id="verify", interval_secs=7200)
+            ok("update_schedule interval", sc and sc["interval_secs"] == 7200, (sc, e))
+            sc, e = await call("get_schedule", id="verify")
+            ok("get_schedule reflects update", sc and sc["interval_secs"] == 7200, (sc, e))
+            _, e = await call("update_schedule", id="verify", cron="not a cron")
+            ok("bad cron is tool error", e is not None and "400" in e, e)
+            _, e = await call("update_schedule", id="verify")
+            ok("update_schedule no args is tool error", e is not None)
+            job, e = await call("run_schedule", id="verify")
+            ok("run_schedule", job and job["type"] == "verify" and job["schedule_id"] == "verify", (job, e))
+            job, e = await call("wait_for_job", id=job["id"], timeout_s=30)
+            ok("scheduled job reaches done", job and job["state"] == "done" and not job.get("timed_out"), (job, e))
+            job, e = await call("create_job", type="verify")
+            ok("create_job verify", job and job["type"] == "verify", (job, e))
+            job, e = await call("wait_for_job", id=job["id"], timeout_s=30)
+            ok("created verify job done", job and job["state"] == "done", (job, e))
+            g, e = await call("get_job", id=job["id"])
+            ok("get_job has logs", g and "logs" in g, (g, e))
+            lj, e = await call("list_jobs", state="done", type="verify")
+            ok("list_jobs filter", lj and lj["total"] >= 2 and all(j["type"] == "verify" for j in lj["jobs"]), (lj, e))
+            future = int(time.time()) + 3600
+            qj, e = await call("create_job", type="backup", run_at=future)
+            ok("create deferred job", qj and qj["state"] == "queued", (qj, e))
+            pj, e = await call("pause_job", id=qj["id"])
+            ok("pause_job", pj and pj["state"] == "paused", (pj, e))
+            rj, e = await call("resume_job", id=qj["id"])
+            ok("resume_job", rj and rj["state"] == "queued", (rj, e))
+            cj, e = await call("cancel_job", id=qj["id"])
+            ok("cancel_job", cj and cj["state"] == "cancelled", (cj, e))
+            _, e = await call("cancel_job", id=qj["id"])
+            ok("cancel finished job is 409 tool error", e is not None and "409" in e, e)
+            rj, e = await call("retry_job", id=qj["id"])
+            ok("retry_job", rj and rj["state"] == "queued", (rj, e))
+            await call("cancel_job", id=qj["id"])
+            _, e = await call("delete_job", id=qj["id"])
+            ok("delete_job", e is None, e)
+            _, e = await call("get_job", id=qj["id"])
+            ok("deleted job 404", e is not None and "404" in e, e)
+            stt, e = await call("job_stats")
+            ok("job_stats", stt and "by_state" in stt and "workers" in stt, (stt, e))
+            _, e = await call("create_job", type="bogus")
+            ok("create_job bad type is tool error", e is not None and "400" in e, e)
     finally:
         if srv:
             srv.terminate()

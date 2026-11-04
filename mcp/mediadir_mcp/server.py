@@ -8,6 +8,7 @@ import functools
 import json
 import os
 import re
+import time
 from typing import Any, Optional
 from urllib.parse import quote, urlencode
 
@@ -550,6 +551,125 @@ def ingest_status(records: bool = False, state: Optional[str] = None, limit: int
     if records:
         out["records"] = _call("GET", "/api/ingest", params={"state": state, "limit": limit})
     return out
+
+
+# ---------------------------------------------------------------- jobs and schedules
+
+_JOB_TERMINAL = ("done", "failed", "cancelled")
+
+
+def _job_path(job_id: str, action: str = "") -> str:
+    return f"/api/jobs/{_enc(job_id)}" + (f"/{action}" if action else "")
+
+
+@tool()
+def list_jobs(state: Optional[str] = None, type: Optional[str] = None, limit: int = 50, offset: int = 0) -> Any:
+    """List background jobs, newest first: {jobs, total, limit, offset}. state: queued, running, paused,
+    done, failed, cancelled. type: ingest, hash, verify, sidecars, backup, asset_gc, analytics_snapshot,
+    analytics_rollup."""
+    return _call("GET", "/api/jobs", params={"state": state, "type": type, "limit": limit, "offset": offset})
+
+
+@tool()
+def get_job(id: str) -> Any:
+    """One job (state, progress, result, error, ...) including its log lines (oldest first)."""
+    return _call("GET", _job_path(id))
+
+
+@tool()
+def create_job(type: str, params: Optional[dict] = None, priority: Optional[int] = None,
+               run_at: Optional[int] = None) -> Any:
+    """Queue a job. type: hash ({} or {file_id}), verify, sidecars, backup, asset_gc ({grace_secs?}),
+    analytics_snapshot, analytics_rollup, ingest ({path}: absolute path inside INGEST_DIR). run_at is a
+    unix-seconds timestamp to defer it. Unknown type or bad params -> tool error."""
+    body: dict = {"type": type}
+    if params is not None:
+        body["params"] = params
+    if priority is not None:
+        body["priority"] = priority
+    if run_at is not None:
+        body["run_at"] = run_at
+    return _call("POST", "/api/jobs", json=body)
+
+
+@tool()
+def cancel_job(id: str) -> Any:
+    """Cancel a job (queued/paused: immediately; running: at its next checkpoint). Finished jobs -> error."""
+    return _call("POST", _job_path(id, "cancel"))
+
+
+@tool()
+def pause_job(id: str) -> Any:
+    """Pause a queued or running job (running parks at its next checkpoint; ingest jobs cannot be paused)."""
+    return _call("POST", _job_path(id, "pause"))
+
+
+@tool()
+def resume_job(id: str) -> Any:
+    """Resume a paused job (back to queued, continuing from its checkpoint)."""
+    return _call("POST", _job_path(id, "resume"))
+
+
+@tool()
+def retry_job(id: str) -> Any:
+    """Re-queue a failed or cancelled job from scratch."""
+    return _call("POST", _job_path(id, "retry"))
+
+
+@tool()
+def delete_job(id: str) -> Any:
+    """Delete a finished (done/failed/cancelled) job record. Does not touch any media."""
+    return _call("DELETE", _job_path(id))
+
+
+@tool()
+def job_stats() -> Any:
+    """Job counts by state and by type, plus worker utilization: {by_state, by_type, workers}."""
+    return _call("GET", "/api/jobs/stats")
+
+
+@tool()
+def wait_for_job(id: str, timeout_s: float = 60) -> Any:
+    """Poll a job until it is done/failed/cancelled or timeout_s elapses (max 600). Returns the job plus
+    "timed_out": true if it was still unfinished."""
+    deadline = time.monotonic() + max(0.0, min(float(timeout_s), 600.0))
+    while True:
+        job = _call("GET", _job_path(id))
+        if job.get("state") in _JOB_TERMINAL:
+            return job
+        if time.monotonic() >= deadline:
+            return {**job, "timed_out": True}
+        time.sleep(0.5)
+
+
+@tool()
+def list_schedules() -> Any:
+    """List recurring job schedules (id, type, interval_secs, cron, enabled, next_run, last_run, last_job_id)."""
+    return _call("GET", "/api/schedules")
+
+
+@tool()
+def get_schedule(id: str) -> Any:
+    """One schedule by id (sidecars, verify, backup, asset_gc, hash, analytics_snapshot, analytics_rollup)."""
+    return _call("GET", f"/api/schedules/{_enc(id)}")
+
+
+@tool()
+def update_schedule(id: str, interval_secs: Optional[int] = None, cron: Optional[str] = None,
+                    enabled: Optional[bool] = None, params: Optional[dict] = None) -> Any:
+    """Change a schedule. interval_secs >= 1; cron is 5-field UTC ("m h dom mon dow") and wins over the
+    interval, "" clears it; enabled toggles it; params replaces the job params. At least one required."""
+    body = {k: v for k, v in (("interval_secs", interval_secs), ("cron", cron),
+                              ("enabled", enabled), ("params", params)) if v is not None}
+    if not body:
+        raise ToolError("nothing to update: pass interval_secs, cron, enabled and/or params")
+    return _call("PUT", f"/api/schedules/{_enc(id)}", json=body)
+
+
+@tool()
+def run_schedule(id: str) -> Any:
+    """Queue the schedule's job now (even if disabled). Returns the Job; 409 error while its previous job is unfinished."""
+    return _call("POST", f"/api/schedules/{_enc(id)}/run")
 
 
 def main() -> None:
