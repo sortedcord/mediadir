@@ -53,6 +53,8 @@ class Nav(val controller: NavHostController, private val ctx: Context) {
     fun settings() = controller.navigate(Routes.SETTINGS)
     fun settingsPage(name: String) = controller.navigate("settings/$name")
     fun ingest() = controller.navigate("ingest")
+    fun jobs() = controller.navigate("jobs")
+    fun job(id: String) = controller.navigate("jobs/$id")
     fun fieldSettings() = controller.navigate(Routes.FIELDS)
     fun home() = controller.navigate(Routes.HOME) { popUpTo(0) }
     /** Contract with the player: it fetches /api/items/{id}/playback itself. */
@@ -82,6 +84,8 @@ fun AppNav(ctx: Context) {
             composable("settings/playback") { PlaybackSettingsScreen(nav) }
             composable("settings/about") { AboutSettingsScreen(nav) }
             composable("ingest") { IngestScreen(nav) }
+            composable("jobs") { JobsScreen(nav) }
+            composable("jobs/{id}", idArg) { JobDetailScreen(nav, it.arguments!!.getString("id")!!) }
             composable(Routes.FIELDS) { FieldSettingsScreen(nav) }
         }
         NavigationBar {
