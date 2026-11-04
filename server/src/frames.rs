@@ -15,6 +15,8 @@ use tokio::sync::Semaphore;
 pub enum FrameFormat {
     Jpg,
     Webp,
+    /// Lossless PNG of the exact decoded frame.
+    Png,
 }
 
 impl FrameFormat {
@@ -22,6 +24,7 @@ impl FrameFormat {
         match s {
             "jpg" | "jpeg" => Some(FrameFormat::Jpg),
             "webp" => Some(FrameFormat::Webp),
+            "png" | "raw" | "lossless" => Some(FrameFormat::Png),
             _ => None,
         }
     }
@@ -29,12 +32,14 @@ impl FrameFormat {
         match self {
             FrameFormat::Jpg => "jpg",
             FrameFormat::Webp => "webp",
+            FrameFormat::Png => "png",
         }
     }
     pub fn mime(self) -> &'static str {
         match self {
             FrameFormat::Jpg => "image/jpeg",
             FrameFormat::Webp => "image/webp",
+            FrameFormat::Png => "image/png",
         }
     }
 }
@@ -145,6 +150,11 @@ impl FrameService {
         filters.push(match fmt {
             FrameFormat::Jpg => "format=yuvj420p".into(),
             FrameFormat::Webp => "format=yuv420p".into(),
+            // Tone-mapped HDR is already 8-bit SDR; other >8-bit sources keep their depth (16-bit PNG).
+            FrameFormat::Png => {
+                let deep = !(hdr && self.tonemap) && file.video.as_ref().and_then(|v| v.bit_depth).unwrap_or(8) > 8;
+                format!("scale=in_range=auto:out_range=full:flags=accurate_rnd+full_chroma_int+full_chroma_inp,format={}", if deep { "rgb48be" } else { "rgb24" })
+            }
         });
         filters.push("showinfo".into());
         let threads = self.threads.to_string();
@@ -155,6 +165,7 @@ impl FrameService {
         match fmt {
             FrameFormat::Jpg => cmd.args(["-c:v", "mjpeg", "-q:v", "2"]),
             FrameFormat::Webp => cmd.args(["-c:v", "libwebp", "-quality", "92", "-compression_level", "1"]),
+            FrameFormat::Png => cmd.args(["-c:v", "png", "-compression_level", "1"]),
         };
         cmd.args(["-f", "image2"]).arg(&out).kill_on_drop(true);
         cmd.stdout(std::process::Stdio::null()).stderr(std::process::Stdio::piped());

@@ -460,8 +460,8 @@ Implementation choices where the contract is open; all are additive / backward c
   - `MediaFile.part` / `MediaFile.edition` and queue entries' `part` are always null (no stacking or editions; versions are just more files of the item, labelled by resolution/codec).
 
 ## Still frames (paused high-quality frame) — v2.1
-`GET /frame/{file_id}?t=<seconds, float>&max_w=<int, optional>&fmt=<jpg|webp, default jpg>`
-- Extracts ONE still frame (no transcoding of media) at timestamp `t` from that MediaFile with frame-accurate seek, returns `image/jpeg` (quality ~92) or `image/webp`.
+`GET /frame/{file_id}?t=<seconds, float>&max_w=<int, optional>&fmt=<jpg|webp|png, default jpg>`
+- Extracts ONE still frame (no transcoding of media) at timestamp `t` from that MediaFile with frame-accurate seek, returns `image/jpeg` (quality ~92), `image/webp`, or `image/png`. `fmt=png` (aliases `raw`, `lossless`) is a lossless PNG of the exact decoded frame: rgb24 (8-bit, full-range RGB; HDR is tone-mapped to SDR first), or 16-bit rgb48 for non-HDR sources deeper than 8 bits. It is much larger and slower than jpg; `Content-Length` is always present.
 - Full source resolution unless `max_w` is given (aspect preserved). HDR sources are tone-mapped to SDR.
 - Response headers: `X-Frame-Width`, `X-Frame-Height`, `X-Frame-Pts` (actual pts in seconds), `Cache-Control: public, max-age=31536000`.
 - Server caches results on disk (`DATA_DIR/frames`, LRU-capped, default 2 GB via env `FRAME_CACHE_MB`), keyed by file id + pts rounded to the millisecond + max_w + fmt.

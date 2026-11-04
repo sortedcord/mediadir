@@ -59,7 +59,7 @@ async fn frame(
     req: Request,
 ) -> AppResult<Response> {
     let fmt = crate::frames::FrameFormat::parse(p.fmt.as_deref().unwrap_or("jpg"))
-        .ok_or_else(|| AppError::bad("fmt must be jpg or webp"))?;
+        .ok_or_else(|| AppError::bad("fmt must be jpg, webp or png"))?;
     let t = p.t.ok_or_else(|| AppError::bad("t is required"))?;
     let file = st.db.call(move |r| r.get_file(&file_id)).await?;
     if file.video.is_none() {

@@ -678,6 +678,14 @@ def main():
         exp_h = round(f["video"]["height"] * w / f["video"]["width"] / 2) * 2
         assert h["Content-Type"] == "image/webp" and body[:4] == b"RIFF" and h["X-Frame-Width"] == str(w)
         assert abs(int(h["X-Frame-Height"]) - exp_h) <= 2, (h["X-Frame-Height"], exp_h)
+        st, h, body = req("GET", f"/frame/{f['id']}?t={t}&fmt=png", raw=True, expect=200)
+        assert h["Content-Type"] == "image/png" and body[:8] == b"\x89PNG\r\n\x1a\n", "png magic"
+        import struct
+        pw, ph = struct.unpack(">II", body[16:24])
+        assert (pw, ph) == (f["video"]["width"], f["video"]["height"]), (pw, ph)
+        assert h["X-Frame-Cache"] == "miss"
+        st, h2, body2 = req("GET", f"/frame/{f['id']}?t={t}&fmt=raw", raw=True, expect=200)
+        assert body2 == body and h2["X-Frame-Cache"] == "hit", "png cache hit"
         for q in ("t=-1", "t=99999", "", "t=1&fmt=gif"):
             s, b = req("GET", f"/frame/{f['id']}?{q}")
             assert s == 400 and "error" in b, (q, s)
