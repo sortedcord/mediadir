@@ -11,7 +11,6 @@ use crate::model::Item;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::collections::HashSet;
-use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
@@ -20,7 +19,7 @@ const WEEK: u64 = 7 * 86400;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct Problem {
-    /// `missing`, `corrupt`, or `changed` (a referenced file's size/mtime changed; re-fingerprinted)
+    /// `missing`, `corrupt`, or `changed` (a symlinked file's size/mtime changed; re-fingerprinted)
     pub problem: String,
     pub file_id: String,
     pub item_id: String,
@@ -152,7 +151,7 @@ impl Maintenance {
         for st in repo.all_file_states()? {
             let f = &st.file;
             if f.is_external() {
-                continue; // never write next to (or about) referenced media
+                continue; // never write next to (or about) symlinked entries
             }
             let ch = chain(&f.item_id);
             let Some(item) = ch.first() else { continue };
@@ -177,7 +176,7 @@ impl Maintenance {
                 },
             });
             let path = self.store.sidecar_path(&f.store_path);
-            if let Err(e) = write_readonly(&path, &serde_json::to_vec_pretty(&doc)?) {
+            if let Err(e) = write_atomic(&path, &serde_json::to_vec_pretty(&doc)?) {
                 eprintln!("sidecars: {}: {e}", path.display());
                 continue;
             }
@@ -187,13 +186,9 @@ impl Maintenance {
         Ok(written)
     }
 
-    /// Where a file's bytes are (store blob or referenced target).
+    /// The store entry of a file (a regular file, or a symlink to the referenced target).
     fn path_of(&self, f: &crate::model::MediaFile) -> PathBuf {
-        match (&self.cfg.external_root, f.is_external()) {
-            (Some(root), true) => root.join(&f.store_path),
-            (None, true) => PathBuf::from("<EXTERNAL_ROOT unset>").join(&f.store_path),
-            _ => self.store.abs(&f.store_path),
-        }
+        self.store.abs(&f.store_path)
     }
 
     /// Every stored file must exist with the right size; a rotating slice is re-hashed so the
@@ -216,7 +211,7 @@ impl Maintenance {
         for st in &files {
             let f = &st.file;
             if f.is_external() {
-                // referenced media: existence + size + mtime every run; never deleted or modified
+                // symlinked entry: the target's existence + size + mtime every run; never deleted or modified
                 match std::fs::metadata(self.path_of(f)) {
                     Err(e) => problems.push(problem("missing", f, e.to_string())),
                     Ok(m) => {
@@ -241,7 +236,7 @@ impl Maintenance {
                 bad.insert(f.id.clone());
                 continue;
             }
-            match std::fs::metadata(self.store.abs(&f.store_path)) {
+            match std::fs::metadata(self.path_of(f)) {
                 Err(e) => problems.push(problem("missing", f, e.to_string())),
                 Ok(m) if m.len() != f.size => problems.push(problem("corrupt", f, format!("size is {} bytes, expected {}", m.len(), f.size))),
                 Ok(_) => continue,
@@ -354,11 +349,10 @@ impl Maintenance {
     }
 }
 
-/// Atomically replace `path` with `bytes`, read-only.
-fn write_readonly(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+/// Atomically replace `path` with `bytes`.
+fn write_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     let tmp = path.with_extension("json.tmp");
     let _ = std::fs::remove_file(&tmp);
     std::fs::write(&tmp, bytes)?;
-    std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o444))?;
     std::fs::rename(&tmp, path)
 }

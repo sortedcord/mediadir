@@ -28,9 +28,6 @@ pub struct Config {
     pub verify_interval: Option<Duration>,
     pub backup_interval: Option<Duration>,
     pub backup_keep: usize,
-    /// Optional root of referenced media: symlinks in INGEST_DIR to files under it are catalogued
-    /// in place (never copied, linked, moved or written). `None` = feature off.
-    pub external_root: Option<PathBuf>,
     /// Background full-hash rate for referenced files, bytes/second (`0` = unlimited).
     pub lazy_hash_rate: u64,
     /// Library snapshot cadence (`None` = only the one at startup).
@@ -73,7 +70,6 @@ impl Config {
             verify_interval: every("VERIFY_INTERVAL", 86400),
             backup_interval: every("BACKUP_INTERVAL", 21600),
             backup_keep: secs("BACKUP_KEEP", 14).max(1) as usize,
-            external_root: env("EXTERNAL_ROOT").map(|v| absolute(PathBuf::from(v.trim()))),
             lazy_hash_rate: secs("LAZY_HASH_MB_S", 64) * 1024 * 1024,
             analytics_snapshot: every("ANALYTICS_SNAPSHOT_SECS", 3600),
             analytics_raw_days: secs("ANALYTICS_RAW_DAYS", 30),
@@ -94,12 +90,24 @@ impl Config {
                 return Err(format!("ASSET_DIR ({}) and {name} ({}) must not contain each other", a.display(), d.display()));
             }
         }
-        if let Some(x) = &self.external_root {
-            for (name, d) in [("MEDIA_DIR", m), ("ASSET_DIR", a), ("DATA_DIR", &self.data_dir)] {
-                if x.starts_with(d) || d.starts_with(x) {
-                    return Err(format!("EXTERNAL_ROOT ({}) and {name} ({}) must not contain each other", x.display(), d.display()));
-                }
-            }
+        Ok(())
+    }
+
+    /// INGEST_DIR and MEDIA_DIR must be on one filesystem: placement is a single rename(2).
+    pub fn check_same_fs(&self) -> Result<(), String> {
+        use std::os::unix::fs::MetadataExt;
+        // a directory that does not exist yet will be created on its nearest existing ancestor's filesystem
+        let dev = |d: &PathBuf| -> Result<u64, String> {
+            let existing = d.ancestors().find(|a| a.exists()).ok_or_else(|| format!("{} has no existing parent", d.display()))?;
+            std::fs::metadata(existing).map(|m| m.dev()).map_err(|e| format!("cannot stat {}: {e}", existing.display()))
+        };
+        let (i, m) = (dev(&self.ingest_dir)?, dev(&self.media_dir)?);
+        if i != m {
+            return Err(format!(
+                "INGEST_DIR ({}) and MEDIA_DIR ({}) are on different filesystems; ingest moves entries into the store with rename(2), so they must share one filesystem",
+                self.ingest_dir.display(),
+                self.media_dir.display()
+            ));
         }
         Ok(())
     }
@@ -119,5 +127,26 @@ mod tests {
         assert!(c.validate().is_ok());
         c.asset_dir = "/a/store/assets".into();
         assert!(c.validate().is_err());
+    }
+
+    #[test]
+    fn cross_filesystem_is_refused() {
+        use std::os::unix::fs::MetadataExt;
+        let a = std::env::temp_dir().join(format!("mediadir-cfg-a-{}", std::process::id()));
+        let b = std::path::PathBuf::from("/dev/shm").join(format!("mediadir-cfg-b-{}", std::process::id()));
+        std::fs::create_dir_all(&a).unwrap();
+        let mut c = Config::from_env();
+        c.ingest_dir = a.join("ingest");
+        c.media_dir = a.join("store");
+        assert!(c.check_same_fs().is_ok());
+        if std::fs::create_dir_all(&b).is_ok() && std::fs::metadata(&b).unwrap().dev() != std::fs::metadata(&a).unwrap().dev() {
+            c.media_dir = b.join("store");
+            let e = c.check_same_fs().unwrap_err();
+            assert!(e.contains("different filesystems"), "{e}");
+        } else {
+            eprintln!("skipped: /dev/shm is not a separate filesystem here");
+        }
+        let _ = std::fs::remove_dir_all(&a);
+        let _ = std::fs::remove_dir_all(&b);
     }
 }

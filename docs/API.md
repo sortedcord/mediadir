@@ -94,8 +94,9 @@ ItemSummary (lists, children, search, relation members, credits, playback, ...).
 *v3:* `path` is the file name the media arrived with (the stored blob's location is private);
 `hash` (BLAKE3), `original_name`, `added_at` are new. Every file is `original: true`; subtitles are
 the embedded streams only (`external` is always null; there is no `/subtitle` endpoint).
-*Referenced media* (see [STORAGE.md](STORAGE.md#referenced-media)): `location` is `"store"` (MediaDir's own
-copy) or `"external"` (catalogued in place under `EXTERNAL_ROOT`; streaming/frames work the same).
+*Symlinked media* (see [STORAGE.md](STORAGE.md#symlinked-media)): `location` is `"store"` (the store entry is a
+regular file MediaDir holds) or `"external"` (the store entry is a symlink to media kept elsewhere; streaming/frames
+work the same).
 `hash_state` is `"full"` (`hash` = BLAKE3 hex) or `"pending"` (only external files: `hash` is `fp:<64 hex>`, a quick
 fingerprint, until the background task has the full hash; clients must not treat it as a BLAKE3). Both fields are
 always present.
@@ -187,7 +188,7 @@ All JSON. Errors: non-2xx with `{ "error": "message" }`.
 | POST | `/api/assets` | *v3:* upload an image, raw body → `{hash, mime, width, height, size}` (see [Images](#images-v3)) |
 | GET | `/asset/{hash}` | *v3:* original or transformed image, `w,h,fit,fmt,q,original` |
 | GET | `/api/ingest` · `/api/ingest/{id}` | *v3:* ingest records ([STORAGE.md](STORAGE.md)) |
-| GET | `/api/ingest/status` | *v3:* watcher/queue/task status, plus `external_root` (string or null) and `pending_hashes` (referenced files still awaiting their full hash). `problems[].problem` is `missing`, `corrupt` or `changed` |
+| GET | `/api/ingest/status` | *v3:* watcher/queue/task status, plus `pending_hashes` (symlinked files still awaiting their full hash). `problems[].problem` is `missing`, `corrupt` or `changed` |
 | POST | `/api/ingest/scan` | *v3:* force a poll of the ingest dir, 202 |
 | POST | `/api/ingest/upload` | *v3:* raw body + `X-Filename` |
 | GET | `/api/relations` | *v3:* `type, q, limit=50, offset=0` → `{total, relations:[RelationSummary]}` |
@@ -307,7 +308,7 @@ Buckets are UTC; weeks start Monday; months are calendar months. `from`/`to` are
   "assets": { "count": 10, "bytes": 5000 }, "people": 30,
   "relations": { "count": 4, "members": 12 }, "field_defs": 14,
   "ingest": { "queue": 0, "settling": 0, "active": 0, "problems": 0, "pending_hashes": 0, "records_by_state": { "done": 70 } },
-  "disks": { "data": { "path": "…", "total_bytes": 1, "free_bytes": 1, "avail_bytes": 1, "used_bytes": 1 }, "media": { … }, "assets": { … }, "external": { … only when EXTERNAL_ROOT is set } } }
+  "disks": { "data": { "path": "…", "total_bytes": 1, "free_bytes": 1, "avail_bytes": 1, "used_bytes": 1 }, "media": { … }, "assets": { … } } }
 ```
 
 **`GET /library`** -> `{ "from", "to", "bucket", "series": [ Snapshot + {t, ts} ] }` ordered by `t`; the last snapshot of each bucket.

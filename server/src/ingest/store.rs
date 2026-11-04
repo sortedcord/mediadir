@@ -1,12 +1,12 @@
 //! MediaDir's private, content-addressed store: `MEDIA_DIR/<h[0..2]>/<h[2..4]>/<hash>.<ext>`.
 //!
-//! Files get in by reflink (FICLONE) → hardlink → move; never by copy or symlink. Stored files
-//! are read-only (0444), store directories 0700.
+//! Entries get in by a single rename(2) of the directory entry (regular file, hardlink or symlink
+//! alike), never by copy; INGEST_DIR is on the same filesystem as the store. Stored files are never
+//! chmod'ed; store directories are 0700.
 
-use std::fs::{self, File, OpenOptions, Permissions};
+use std::fs::{self, File};
 use std::io;
-use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt};
-use std::os::unix::io::AsRawFd;
+use std::os::unix::fs::DirBuilderExt;
 use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone)]
@@ -32,10 +32,14 @@ impl Store {
         self.root.join(".staging")
     }
 
-    /// Store-relative path of a blob.
+    /// Store-relative path of a blob. A pending (`fp:<hex>`) hash gets `fp/<hex[0..2]>/<hex>.<ext>`
+    /// until its full hash is known; that never collides with a hash directory (`p` is not hex).
     pub fn rel_path(hash: &str, ext: &str) -> String {
         let ext = if ext.is_empty() { "bin" } else { ext };
-        format!("{}/{}/{hash}.{ext}", &hash[0..2], &hash[2..4])
+        match hash.strip_prefix("fp:") {
+            Some(fp) => format!("fp/{}/{fp}.{ext}", &fp[0..2]),
+            None => format!("{}/{}/{hash}.{ext}", &hash[0..2], &hash[2..4]),
+        }
     }
 
     pub fn abs(&self, rel: &str) -> PathBuf {
@@ -143,98 +147,42 @@ pub fn hash_file_throttled(path: &Path, rate: u64) -> io::Result<(String, u64)> 
     Ok((h.finalize().to_hex().to_string(), n))
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum PlaceMethod {
-    Reflink,
-    Hardlink,
-    Move,
-}
-
-impl PlaceMethod {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            PlaceMethod::Reflink => "reflink",
-            PlaceMethod::Hardlink => "hardlink",
-            PlaceMethod::Move => "move",
-        }
-    }
-}
-
-/// Which placement methods may be tried, in order reflink → hardlink → move.
-#[derive(Debug, Clone, Copy)]
-pub struct PlaceOpts {
-    pub reflink: bool,
-    pub hardlink: bool,
-    pub allow_move: bool,
-}
-
-impl PlaceOpts {
-    /// Ingest-dir files: keep the original in place when the filesystem allows it.
-    pub const LINK_OR_MOVE: PlaceOpts = PlaceOpts { reflink: true, hardlink: true, allow_move: true };
-    /// Staged uploads: just rename into place.
-    pub const MOVE: PlaceOpts = PlaceOpts { reflink: false, hardlink: false, allow_move: true };
-}
-
-/// Put `src` at `dst` without copying bytes, then make `dst` read-only.
-/// `dst` must not exist (`AlreadyExists` otherwise). Never copies, never symlinks.
-pub fn place(src: &Path, dst: &Path, opts: PlaceOpts) -> io::Result<PlaceMethod> {
+/// Put the directory entry `src` at `dst` with one rename(2) (`dst` must not exist). A regular file
+/// or hardlink moves as is; a symlink moves as the link itself (its target is never followed). A
+/// symlink with a relative target would dangle from the store, so it is re-created at `dst` with the
+/// absolute target and the caller removes `src` once the placement is committed ([`finish_place`]).
+/// Returns whether `src` still has to be removed by [`finish_place`].
+pub fn place(src: &Path, dst: &Path) -> io::Result<bool> {
     if fs::symlink_metadata(dst).is_ok() {
         return Err(io::Error::new(io::ErrorKind::AlreadyExists, format!("{} already exists", dst.display())));
     }
-    let mut last: Option<io::Error> = None;
-    let mut method = None;
-    if opts.reflink {
-        match reflink(src, dst) {
-            Ok(()) => method = Some(PlaceMethod::Reflink),
-            Err(e) if e.kind() == io::ErrorKind::AlreadyExists => return Err(e),
-            Err(e) => last = Some(e),
+    if let Ok(target) = fs::read_link(src) {
+        if target.is_relative() {
+            let abs = fs::canonicalize(src)?; // fully resolved; dangling links were rejected before
+            std::os::unix::fs::symlink(abs, dst)?;
+            return Ok(true);
         }
     }
-    if method.is_none() && opts.hardlink {
-        match fs::hard_link(src, dst) {
-            Ok(()) => method = Some(PlaceMethod::Hardlink),
-            Err(e) if e.kind() == io::ErrorKind::AlreadyExists => return Err(e),
-            Err(e) => last = Some(e),
-        }
-    }
-    if method.is_none() && opts.allow_move {
-        // rename never copies: across filesystems it fails with EXDEV
-        match fs::rename(src, dst) {
-            Ok(()) => method = Some(PlaceMethod::Move),
-            Err(e) => last = Some(e),
-        }
-    }
-    let Some(method) = method else {
-        return Err(last.unwrap_or_else(|| io::Error::other("no placement method allowed")));
-    };
-    // a hardlinked original shares the inode, so it becomes read-only too
-    if let Err(e) = fs::set_permissions(dst, Permissions::from_mode(0o444)) {
-        eprintln!("store: cannot make {} read-only: {e}", dst.display());
-    }
-    Ok(method)
+    fs::rename(src, dst)?;
+    Ok(false)
 }
 
-/// Undo a placement after a later pipeline step failed: links are dropped, a move is reversed.
-pub fn unplace(src: &Path, dst: &Path, method: PlaceMethod) -> io::Result<()> {
-    match method {
-        PlaceMethod::Reflink | PlaceMethod::Hardlink => fs::remove_file(dst),
-        PlaceMethod::Move => fs::rename(dst, src),
+/// Complete a [`place`] that re-created a link: drop the original ingest entry (only the link).
+pub fn finish_place(src: &Path, recreated: bool) {
+    if recreated {
+        if let Err(e) = fs::remove_file(src) {
+            eprintln!("store: cannot remove ingest link {}: {e}", src.display());
+        }
     }
 }
 
-/// Copy-on-write clone (btrfs, xfs, bcachefs...). Fails with EOPNOTSUPP/EXDEV/EINVAL elsewhere.
-fn reflink(src: &Path, dst: &Path) -> io::Result<()> {
-    let s = File::open(src)?;
-    let d = OpenOptions::new().write(true).create_new(true).mode(0o600).open(dst)?;
-    // SAFETY: both descriptors are open for the duration of the call.
-    let r = unsafe { libc::ioctl(d.as_raw_fd(), libc::FICLONE as _, s.as_raw_fd()) };
-    if r != 0 {
-        let e = io::Error::last_os_error();
-        drop(d);
-        let _ = fs::remove_file(dst);
-        return Err(e);
+/// Undo a placement after a later pipeline step failed.
+pub fn unplace(src: &Path, dst: &Path, recreated: bool) -> io::Result<()> {
+    if recreated {
+        fs::remove_file(dst)
+    } else {
+        fs::rename(dst, src)
     }
-    Ok(())
 }
 
 #[cfg(test)]
@@ -267,64 +215,68 @@ mod tests {
     }
 
     #[test]
-    fn hardlinks_on_same_filesystem() {
-        let d = tmpdir("link");
+    fn rename_keeps_inode_and_mode() {
+        use std::os::unix::fs::PermissionsExt;
+        let d = tmpdir("rename");
         let src = d.join("movie.mkv");
         fs::write(&src, b"bytes").unwrap();
-        let dst = d.join("blob.mkv");
-        // reflink is unsupported on tmpfs/ext4, so this exercises the reflink -> hardlink fallback
-        let m = place(&src, &dst, PlaceOpts::LINK_OR_MOVE).unwrap();
-        assert!(src.exists(), "original stays in place");
-        let (a, b) = (fs::metadata(&src).unwrap(), fs::metadata(&dst).unwrap());
-        if m == PlaceMethod::Hardlink {
-            assert_eq!(a.ino(), b.ino());
-        } else {
-            assert_eq!(m, PlaceMethod::Reflink);
-        }
-        assert_eq!(b.mode() & 0o777, 0o444);
-        fs::remove_dir_all(&d).unwrap();
-    }
-
-    #[test]
-    fn moves_when_linking_fails() {
-        let d = tmpdir("move");
-        let src = d.join("upload.mkv");
-        fs::write(&src, b"bytes").unwrap();
+        fs::set_permissions(&src, fs::Permissions::from_mode(0o640)).unwrap();
+        let other = d.join("other-link.mkv");
+        fs::hard_link(&src, &other).unwrap();
         let dst = d.join("blob.mkv");
         let ino = fs::metadata(&src).unwrap().ino();
-        // linking is unavailable (e.g. EXDEV / EPERM): only a move is left
-        let m = place(&src, &dst, PlaceOpts { reflink: true, hardlink: false, allow_move: true });
-        let m = m.unwrap();
-        assert!(matches!(m, PlaceMethod::Move | PlaceMethod::Reflink));
-        if m == PlaceMethod::Move {
-            assert!(!src.exists(), "moved away");
-            assert_eq!(fs::metadata(&dst).unwrap().ino(), ino, "a rename, not a copy");
-        }
-        assert_eq!(fs::read(&dst).unwrap(), b"bytes");
-        // moving back undoes it
-        if m == PlaceMethod::Move {
-            unplace(&src, &dst, m).unwrap();
-            assert!(src.exists() && !dst.exists());
-        }
-        // a link failure with no move allowed is an error, never a copy
-        let other = d.join("never.mkv");
-        let e = place(&src, &other, PlaceOpts { reflink: false, hardlink: false, allow_move: false });
-        assert!(e.is_err() && !other.exists());
+        assert!(!place(&src, &dst).unwrap());
+        assert!(!src.exists() && other.exists(), "only the dropped entry moved; the other link stays");
+        let m = fs::metadata(&dst).unwrap();
+        assert_eq!((m.ino(), m.mode() & 0o777, m.nlink()), (ino, 0o640, 2), "a rename: same inode, no chmod");
+        unplace(&src, &dst, false).unwrap();
+        assert!(src.exists() && !dst.exists());
         fs::remove_dir_all(&d).unwrap();
     }
 
     #[test]
-    fn existing_destination_is_a_duplicate() {
+    fn symlinks_move_as_links() {
+        let d = tmpdir("symlink");
+        let target = d.join("real.mkv");
+        fs::write(&target, b"bytes").unwrap();
+        // absolute link: the link itself is renamed
+        let (l1, s1) = (d.join("abs.mkv"), d.join("store-abs.mkv"));
+        std::os::unix::fs::symlink(&target, &l1).unwrap();
+        let ino = fs::symlink_metadata(&l1).unwrap().ino();
+        assert!(!place(&l1, &s1).unwrap());
+        assert!(fs::symlink_metadata(&l1).is_err());
+        assert_eq!(fs::symlink_metadata(&s1).unwrap().ino(), ino);
+        assert_eq!(fs::read_link(&s1).unwrap(), target);
+        // relative link: re-created with the absolute canonical target, original removed on finish
+        fs::create_dir_all(d.join("in/sub")).unwrap();
+        let l2 = d.join("in/sub/rel.mkv");
+        std::os::unix::fs::symlink("../../real.mkv", &l2).unwrap();
+        let s2 = d.join("store-rel.mkv");
+        let recreated = place(&l2, &s2).unwrap();
+        assert!(recreated && fs::symlink_metadata(&l2).is_ok());
+        assert_eq!(fs::read_link(&s2).unwrap(), fs::canonicalize(&target).unwrap());
+        assert_eq!(fs::read(&s2).unwrap(), b"bytes");
+        finish_place(&l2, recreated);
+        assert!(fs::symlink_metadata(&l2).is_err());
+        assert!(target.exists(), "the target is never touched");
+        fs::remove_dir_all(&d).unwrap();
+    }
+
+    #[test]
+    fn existing_destination_is_refused() {
         let d = tmpdir("dup");
         let (a, b, dst) = (d.join("a.mkv"), d.join("b.mkv"), d.join("blob.mkv"));
         fs::write(&a, b"same").unwrap();
         fs::write(&b, b"same").unwrap();
-        place(&a, &dst, PlaceOpts::LINK_OR_MOVE).unwrap();
-        for opts in [PlaceOpts::LINK_OR_MOVE, PlaceOpts::MOVE] {
-            let e = place(&b, &dst, opts).unwrap_err();
-            assert_eq!(e.kind(), io::ErrorKind::AlreadyExists);
-        }
-        assert!(b.exists(), "the duplicate is left alone");
+        place(&a, &dst).unwrap();
+        let e = place(&b, &dst).unwrap_err();
+        assert_eq!(e.kind(), io::ErrorKind::AlreadyExists);
+        assert!(b.exists(), "the source is left alone");
         fs::remove_dir_all(&d).unwrap();
+    }
+
+    #[test]
+    fn pending_hash_paths() {
+        assert_eq!(Store::rel_path(&format!("fp:{}", "ab".repeat(32)), "mkv"), format!("fp/ab/{}.mkv", "ab".repeat(32)));
     }
 }

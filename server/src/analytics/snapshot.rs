@@ -12,7 +12,6 @@ pub struct Paths {
     pub data: PathBuf,
     pub media: PathBuf,
     pub assets: PathBuf,
-    pub external: Option<PathBuf>,
 }
 
 fn grouped(c: &Connection, col: &str) -> AppResult<Value> {
@@ -61,10 +60,7 @@ pub fn collect(db: &Db, ingest: &Ingest, tasks: &Maintenance, paths: &Paths) -> 
     let assets = c.query_row("SELECT COUNT(*), COALESCE(SUM(size),0) FROM assets", [], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?)))?;
     let q = ingest.status();
     let problems = tasks.status(&crate::db::Repo::new(c))?.problems.len();
-    let mut disks = json!({ "data": disk(&paths.data), "media": disk(&paths.media), "assets": disk(&paths.assets) });
-    if let Some(x) = &paths.external {
-        disks["external"] = disk(x);
-    }
+    let disks = json!({ "data": disk(&paths.data), "media": disk(&paths.media), "assets": disk(&paths.assets) });
     Ok(json!({
         "items": { "total": one(c, "SELECT COUNT(*) FROM items"), "by_kind": items_by_kind },
         "files": {

@@ -26,6 +26,10 @@ async fn main() {
         eprintln!("config: {e}");
         std::process::exit(2);
     }
+    if let Err(e) = cfg.check_same_fs() {
+        eprintln!("config: {e}");
+        std::process::exit(2);
+    }
     std::fs::create_dir_all(&cfg.data_dir).expect("create DATA_DIR");
     let db = match Db::open(&cfg.data_dir.join("mediadir.db")) {
         Ok(db) => db,

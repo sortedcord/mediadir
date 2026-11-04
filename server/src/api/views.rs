@@ -56,7 +56,7 @@ pub struct MediaFileDto {
     pub path: String,
     pub original_name: String,
     pub hash: String,
-    /// `store` or `external` (referenced in place).
+    /// `store` (a file MediaDir holds) or `external` (the store entry is a symlink to media kept elsewhere).
     pub location: String,
     /// `full` or `pending` (`hash` is then `fp:<fingerprint>` until the background hash completes).
     pub hash_state: String,

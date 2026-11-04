@@ -9,6 +9,7 @@ pub mod probe;
 pub mod store;
 pub mod thumb;
 mod lazy;
+mod migrate;
 mod watch;
 
 use crate::config::Config;
@@ -24,7 +25,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
-use store::{PlaceOpts, Store};
+use store::Store;
 use tokio::sync::{mpsc, Semaphore};
 
 /// Files processed at the same time (hashing is I/O bound; keep it to 1-2).
@@ -49,8 +50,6 @@ pub struct Ingest {
     watching: AtomicBool,
     watcher: Mutex<Option<notify::RecommendedWatcher>>,
     counter: AtomicU64,
-    /// EXTERNAL_ROOT as configured (canonicalized when used, so a late mount still works).
-    pub external_root: Option<PathBuf>,
     lazy_rate: u64,
 }
 
@@ -113,11 +112,9 @@ pub(crate) fn stat_key(path: &Path) -> Option<SeenKey> {
     Some(SeenKey { dev: m.dev(), ino: m.ino(), size: m.len(), mtime: ns(&m) })
 }
 
-/// A symlink in the ingest dir that passed validation: the canonical target under EXTERNAL_ROOT.
+/// A symlink in the ingest dir that resolves to a regular file: what the probe/fingerprint saw.
 struct Reference {
     canon: PathBuf,
-    /// Path relative to the canonical EXTERNAL_ROOT.
-    rel: String,
     fp: String,
     size: u64,
     mtime: i64,
@@ -144,6 +141,7 @@ pub struct Deleted {
 
 impl Ingest {
     pub fn new(db: Db, cfg: &Config) -> AppResult<Arc<Self>> {
+        cfg.check_same_fs().map_err(AppError::Internal)?;
         std::fs::create_dir_all(&cfg.ingest_dir)?;
         let store = Store::open(&cfg.media_dir)?;
         // leftovers of interrupted uploads
@@ -158,6 +156,7 @@ impl Ingest {
         if n > 0 {
             println!("ingest: {n} records interrupted by a restart marked failed");
         }
+        migrate::migrate_old_external(&repo, &store, &cfg.ingest_dir);
         let seen = repo.all_seen()?.into_iter().map(|k| ((k.dev, k.ino), (k.size, k.mtime))).collect();
         drop(conn);
         let (tx, rx) = mpsc::unbounded_channel();
@@ -178,7 +177,6 @@ impl Ingest {
             watching: AtomicBool::new(false),
             watcher: Mutex::new(None),
             counter: AtomicU64::new(0),
-            external_root: cfg.external_root.clone(),
             lazy_rate: cfg.lazy_hash_rate,
         }))
     }
@@ -261,8 +259,12 @@ impl Ingest {
             let name = path.file_name()?.to_string_lossy().to_string();
             let mut rec = self.new_record("ingest", path.to_string_lossy().to_string(), name, Some(key.size));
             self.save(&rec);
-            let retry = self.run(&mut rec, &path, PlaceOpts::LINK_OR_MOVE, Some(key));
-            if !retry {
+            let retry = self.run(&mut rec, &path, Some(key));
+            if std::fs::symlink_metadata(&path).is_err() {
+                // the entry moved into the store: nothing is left in the ingest dir to remember
+                self.prune_empty_parents(&path);
+            } else if !retry {
+                // failed / duplicate / ignored entries stay in place and are never retried endlessly
                 self.remember(&key, &path, &rec);
             }
             Some(retry)
@@ -270,6 +272,17 @@ impl Ingest {
         self.rt.lock().unwrap().queued.remove(&path);
         if retry == Some(true) {
             self.note(&path);
+        }
+    }
+
+    /// After an entry moved out, drop the (now empty) sub-folders it was dropped in; never INGEST_DIR itself.
+    fn prune_empty_parents(&self, path: &Path) {
+        let mut dir = path.parent();
+        while let Some(d) = dir {
+            if d == self.ingest_dir || !d.starts_with(&self.ingest_dir) || std::fs::remove_dir(d).is_err() {
+                break;
+            }
+            dir = d.parent();
         }
     }
 
@@ -302,7 +315,7 @@ impl Ingest {
         let me = self.clone();
         Ok(tokio::task::spawn_blocking(move || {
             let _permit = permit;
-            me.run(&mut rec, &staging, PlaceOpts::MOVE, None);
+            me.run(&mut rec, &staging, None);
             // duplicate / ignored / failed uploads leave nothing behind
             let _ = std::fs::remove_file(&staging);
             rec
@@ -312,8 +325,8 @@ impl Ingest {
 
     /// Run the pipeline; the record ends in a final state. Returns true when the source changed
     /// while it was processed (it is retried once it settles again).
-    fn run(&self, rec: &mut IngestRecord, src: &Path, opts: PlaceOpts, key: Option<SeenKey>) -> bool {
-        match self.try_run(rec, src, opts, key) {
+    fn run(&self, rec: &mut IngestRecord, src: &Path, key: Option<SeenKey>) -> bool {
+        match self.try_run(rec, src, key) {
             Ok(retry) => retry,
             Err(e) => {
                 eprintln!("ingest: {} failed: {e}", rec.name);
@@ -335,11 +348,11 @@ impl Ingest {
         self.set_state(rec, state);
     }
 
-    fn try_run(&self, rec: &mut IngestRecord, src: &Path, opts: PlaceOpts, key: Option<SeenKey>) -> AppResult<bool> {
+    fn try_run(&self, rec: &mut IngestRecord, src: &Path, key: Option<SeenKey>) -> AppResult<bool> {
         self.set_state(rec, "hashing");
         let is_link = std::fs::symlink_metadata(src).map(|m| m.file_type().is_symlink()).unwrap_or(false);
         let reference = if is_link {
-            match self.resolve_reference(src) {
+            match self.resolve_link(src) {
                 Ok(r) => Some(r),
                 Err(msg) => {
                     self.finish(rec, "failed", Some(msg));
@@ -391,51 +404,26 @@ impl Ingest {
         };
 
         let ext = ext_of(Path::new(&rec.name));
-        if let Some(r) = reference {
-            // referenced media: nothing is placed, linked, moved or written; the row points at the target
-            let input = ClassifyInput { file_name: &rec.name, has_video: probe.video.is_some(), has_audio: !probe.audio.is_empty() };
-            let mapping = self.classifier.classify(&input);
-            let stored = StoredFile {
-                hash,
-                store_path: r.rel,
-                original_name: rec.name.clone(),
-                ext,
-                size,
-                probe,
-                location: crate::model::LOC_EXTERNAL.into(),
-                hash_state: "pending".into(),
-                fingerprint: Some(r.fp),
-                src_mtime: r.mtime,
-            };
-            let attached = catalog::attach(&repo, &mapping, &stored, now())?;
-            rec.placement = Some("reference".into());
-            rec.item_id = Some(attached.item_id.clone());
-            rec.file_id = Some(attached.file_id.clone());
-            println!(
-                "ingest: {} -> {} {} (reference{})",
-                rec.name,
-                repo.get_item(&attached.item_id).map(|i| i.kind.as_str()).unwrap_or("?"),
-                attached.item_id,
-                if attached.version_of_existing { ", new version" } else { "" }
-            );
-            self.finish(rec, "done", None);
-            return Ok(false);
-        }
-
         self.set_state(rec, "placing");
         let rel = Store::rel_path(&hash, &ext);
         self.store.ensure_parent(&rel)?;
         let dst = self.store.abs(&rel);
         if std::fs::symlink_metadata(&dst).is_ok() {
-            // not in the database and not in flight: an orphan from an interrupted run
+            // not in the database and not in flight: an orphan from an interrupted run (a link is removed, never its target)
             eprintln!("ingest: replacing orphaned blob {}", dst.display());
             std::fs::remove_file(&dst)?;
         }
-        let method = store::place(src, &dst, opts)?;
-        rec.placement = Some(method.as_str().into());
+        // one rename(2) of the directory entry (a symlink moves as the link; a relative one is re-created absolute)
+        let recreated = store::place(src, &dst)?;
+        let method = if reference.is_some() { "symlink" } else { "move" };
+        rec.placement = Some(method.into());
 
         let input = ClassifyInput { file_name: &rec.name, has_video: probe.video.is_some(), has_audio: !probe.audio.is_empty() };
         let mapping = self.classifier.classify(&input);
+        let (location, hash_state, fingerprint, src_mtime) = match &reference {
+            Some(r) => (crate::model::LOC_EXTERNAL, "pending", Some(r.fp.clone()), r.mtime),
+            None => (crate::model::LOC_STORE, "full", None, 0),
+        };
         let stored = StoredFile {
             hash,
             store_path: rel,
@@ -443,20 +431,21 @@ impl Ingest {
             ext,
             size,
             probe,
-            location: crate::model::LOC_STORE.into(),
-            hash_state: "full".into(),
-            fingerprint: None,
-            src_mtime: 0,
+            location: location.into(),
+            hash_state: hash_state.into(),
+            fingerprint,
+            src_mtime,
         };
         let attached = match catalog::attach(&repo, &mapping, &stored, now()) {
             Ok(a) => a,
             Err(e) => {
-                if let Err(u) = store::unplace(src, &dst, method) {
+                if let Err(u) = store::unplace(src, &dst, recreated) {
                     eprintln!("ingest: cannot undo placement of {}: {u}", dst.display());
                 }
                 return Err(e);
             }
         };
+        store::finish_place(src, recreated);
         rec.item_id = Some(attached.item_id.clone());
         rec.file_id = Some(attached.file_id.clone());
 
@@ -465,46 +454,26 @@ impl Ingest {
             rec.name,
             repo.get_item(&attached.item_id).map(|i| i.kind.as_str()).unwrap_or("?"),
             attached.item_id,
-            method.as_str(),
+            method,
             if attached.version_of_existing { ", new version" } else { "" }
         );
         self.finish(rec, "done", None);
         Ok(false)
     }
 
-    /// Validate a symlink from the ingest dir and fingerprint its target (read-only).
-    fn resolve_reference(&self, link: &Path) -> Result<Reference, String> {
-        let Some(root) = &self.external_root else {
-            return Err("symlink in the ingest dir, but EXTERNAL_ROOT is not configured (referenced media is off)".into());
-        };
-        let root = std::fs::canonicalize(root).map_err(|e| format!("EXTERNAL_ROOT {} is not accessible: {e}", root.display()))?;
+    /// Resolve a symlink from the ingest dir and fingerprint its target (read-only).
+    fn resolve_link(&self, link: &Path) -> Result<Reference, String> {
         let canon = std::fs::canonicalize(link).map_err(|e| format!("symlink target cannot be resolved (dangling symlink?): {e}"))?;
-        if !canon.starts_with(&root) {
-            return Err(format!("symlink target {} is outside EXTERNAL_ROOT {}", canon.display(), root.display()));
-        }
         if !std::fs::metadata(&canon).map(|m| m.is_file()).unwrap_or(false) {
             return Err(format!("symlink target {} is not a regular file", canon.display()));
         }
-        let rel = canon
-            .strip_prefix(&root)
-            .ok()
-            .and_then(|r| r.to_str())
-            .ok_or_else(|| "symlink target path is not valid UTF-8".to_string())?
-            .to_string();
         let (fp, size, mtime) = store::fingerprint(&canon).map_err(|e| format!("cannot fingerprint {}: {e}", canon.display()))?;
-        Ok(Reference { canon, rel, fp, size, mtime })
+        Ok(Reference { canon, fp, size, mtime })
     }
 
-    /// Where a file's bytes live right now.
+    /// Where a file's bytes are read from: its store entry (a regular file, or a symlink to the media).
     pub fn file_path(&self, f: &MediaFile) -> AppResult<PathBuf> {
-        if f.is_external() {
-            match &self.external_root {
-                Some(root) => Ok(root.join(&f.store_path)),
-                None => Err(AppError::NotFound("referenced file, but EXTERNAL_ROOT is not configured".into())),
-            }
-        } else {
-            Ok(self.store.abs(&f.store_path))
-        }
+        Ok(self.store.abs(&f.store_path))
     }
 
     /// Delete an item (with children) and every stored file it referenced.
@@ -532,9 +501,8 @@ impl Ingest {
 
     fn cleanup(&self, items: &[crate::model::Item], files: &[MediaFile]) -> Deleted {
         for f in files {
-            if f.is_external() {
-                continue; // referenced media: only the database rows go, never the target
-            }
+            // removes the store entry only: for a symlink that is the link (never its target),
+            // for a hardlinked file just this one link
             if let Err(e) = self.store.remove_blob(&f.store_path) {
                 eprintln!("ingest: cannot remove blob {}: {e}", f.store_path);
             }
@@ -601,36 +569,68 @@ mod tests {
     }
 
     #[test]
-    fn duplicate_content_is_recorded_not_placed() {
+    fn regular_file_is_renamed_into_the_store_and_duplicates_stay() {
         let (root, ing) = setup("dup");
-        let a = ing.ingest_dir.join("Band - Song.ogg");
+        let a = ing.ingest_dir.join("sub/Band - Song.ogg");
+        std::fs::create_dir_all(a.parent().unwrap()).unwrap();
         make_media(&a, false, 1);
         let b = ing.ingest_dir.join("Other Name.ogg");
         std::fs::copy(&a, &b).unwrap();
+        let ino_a = std::fs::metadata(&a).unwrap().ino();
 
         let mut r1 = ing.new_record("ingest", a.to_string_lossy().into(), "Band - Song.ogg".into(), None);
-        assert!(!ing.run(&mut r1, &a, PlaceOpts::LINK_OR_MOVE, stat_key(&a)));
+        assert!(!ing.run(&mut r1, &a, stat_key(&a)));
         assert_eq!(r1.state, "done", "{:?}", r1.error);
-        assert_eq!(r1.placement.as_deref(), Some("hardlink"));
+        assert_eq!(r1.placement.as_deref(), Some("move"));
+        assert!(std::fs::symlink_metadata(&a).is_err(), "the entry left the ingest dir");
         let conn = ing.db.conn().unwrap();
         let repo = Repo::new(&conn);
         let f = repo.get_file(r1.file_id.as_ref().unwrap()).unwrap();
         let blob = ing.store.abs(&f.store_path);
-        assert_eq!(std::fs::metadata(&blob).unwrap().ino(), std::fs::metadata(&a).unwrap().ino());
+        let m = std::fs::symlink_metadata(&blob).unwrap();
+        assert!(m.file_type().is_file() && m.ino() == ino_a, "the very same inode: a rename, no copy");
+        assert_eq!(f.location, "store");
         let item = repo.get_item(&f.item_id).unwrap();
         assert_eq!((item.kind.as_str(), item.title.as_str(), item.subtitle.as_deref()), ("track", "Song", Some("Band")));
 
+        // duplicate content: recorded, nothing placed, the file stays in the ingest dir
         let mut r2 = ing.new_record("ingest", b.to_string_lossy().into(), "Other Name.ogg".into(), None);
-        ing.run(&mut r2, &b, PlaceOpts::LINK_OR_MOVE, stat_key(&b));
+        ing.run(&mut r2, &b, stat_key(&b));
         assert_eq!(r2.state, "duplicate");
         assert_eq!(r2.item_id, r1.item_id);
-        assert!(b.exists() && std::fs::metadata(&b).unwrap().ino() != std::fs::metadata(&blob).unwrap().ino());
+        assert!(b.exists() && std::fs::metadata(&b).unwrap().ino() != m.ino());
         assert_eq!(repo.file_count().unwrap(), 1);
 
-        // deleting the item removes the blob but never the ingest original
+        // deleting the item removes the store entry
         ing.delete_item(&f.item_id).unwrap();
-        assert!(!blob.exists() && a.exists());
+        assert!(!blob.exists());
         assert!(repo.find_item(&f.item_id).unwrap().is_none());
+        drop(conn);
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn hardlink_entry_is_renamed_other_links_stay() {
+        let (root, ing) = setup("hl");
+        let other = root.join("library-copy.mkv");
+        make_media(&other, true, 2);
+        let a = ing.ingest_dir.join("Hard Linked (2014).mkv");
+        std::fs::hard_link(&other, &a).unwrap();
+        let ino = std::fs::metadata(&other).unwrap().ino();
+        let mut r = ing.new_record("ingest", a.to_string_lossy().into(), "Hard Linked (2014).mkv".into(), None);
+        ing.run(&mut r, &a, stat_key(&a));
+        assert_eq!((r.state.as_str(), r.placement.as_deref()), ("done", Some("move")), "{:?}", r.error);
+        assert!(!a.exists() && other.exists());
+        let conn = ing.db.conn().unwrap();
+        let f = Repo::new(&conn).get_file(r.file_id.as_ref().unwrap()).unwrap();
+        let blob = ing.store.abs(&f.store_path);
+        let m = std::fs::metadata(&blob).unwrap();
+        assert_eq!((m.ino(), m.nlink()), (ino, 2));
+        // deleting removes just the store link; the other link and its data survive
+        ing.delete_file(&f.id).unwrap();
+        assert!(!blob.exists());
+        assert_eq!(std::fs::metadata(&other).unwrap().ino(), ino);
+        assert_eq!(std::fs::metadata(&other).unwrap().nlink(), 1);
         drop(conn);
         std::fs::remove_dir_all(&root).unwrap();
     }
@@ -643,12 +643,12 @@ mod tests {
         make_media(&b, true, 1);
         make_media(&c, true, 3);
         let mut r1 = ing.new_record("upload", "upload:a".into(), "Versions Test (2015).mkv".into(), None);
-        ing.run(&mut r1, &a, PlaceOpts::MOVE, None);
+        ing.run(&mut r1, &a, None);
         assert_eq!((r1.state.as_str(), r1.placement.as_deref()), ("done", Some("move")), "{:?}", r1.error);
         assert!(!a.exists(), "staged upload was renamed into the store");
         // a second file with the same title+year becomes another version of the same movie
         let mut r2 = ing.new_record("upload", "upload:b".into(), "Versions Test (2015) - 480p.mkv".into(), None);
-        ing.run(&mut r2, &b, PlaceOpts::MOVE, None);
+        ing.run(&mut r2, &b, None);
         assert_eq!(r2.state, "done");
         assert_eq!(r1.item_id, r2.item_id);
         let conn = ing.db.conn().unwrap();
@@ -661,7 +661,7 @@ mod tests {
         assert_eq!(files[0].label, "180p · MPEG4");
         // the same episode twice -> one episode with two versions, under show > season
         let mut r3 = ing.new_record("upload", "upload:c".into(), "Show - S01E02 - Two.mkv".into(), None);
-        ing.run(&mut r3, &c, PlaceOpts::MOVE, None);
+        ing.run(&mut r3, &c, None);
         let ep = repo.get_item(r3.item_id.as_ref().unwrap()).unwrap();
         assert_eq!((ep.kind.as_str(), ep.index, ep.parent_index), ("episode", Some(2), Some(1)));
         let season = repo.get_item(ep.parent_id.as_ref().unwrap()).unwrap();
@@ -682,12 +682,10 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(root.join("data")).unwrap();
         std::fs::create_dir_all(root.join("ext/Movies")).unwrap();
-        std::fs::create_dir_all(root.join("other")).unwrap();
         let mut cfg = Config::from_env();
         cfg.ingest_dir = root.join("ingest");
         cfg.media_dir = root.join("store");
         cfg.data_dir = root.join("data");
-        cfg.external_root = Some(root.join("ext"));
         cfg.lazy_hash_rate = 0;
         let db = Db::open(&cfg.data_dir.join("t.db")).unwrap();
         (root.clone(), root.join("ext"), Ingest::new(db, &cfg).unwrap())
@@ -696,12 +694,12 @@ mod tests {
     fn run_link(ing: &Arc<Ingest>, link: &Path) -> IngestRecord {
         let name = link.file_name().unwrap().to_string_lossy().to_string();
         let mut r = ing.new_record("ingest", link.to_string_lossy().into(), name, None);
-        ing.run(&mut r, link, PlaceOpts::LINK_OR_MOVE, stat_key(link));
+        ing.run(&mut r, link, stat_key(link));
         r
     }
 
     #[test]
-    fn reference_symlink_is_catalogued_in_place_and_hashed_lazily() {
+    fn symlink_is_renamed_into_the_store_and_hashed_lazily() {
         use std::os::unix::fs::PermissionsExt;
         let (root, ext, ing) = setup_ext("ref");
         let target = ext.join("Movies/Ref Movie (2010).mkv");
@@ -712,43 +710,53 @@ mod tests {
         let before = std::fs::metadata(&target).unwrap();
         let link = ing.ingest_dir.join("Ref Movie (2010).mkv");
         std::os::unix::fs::symlink(&target, &link).unwrap();
+        let link_ino = std::fs::symlink_metadata(&link).unwrap().ino();
 
         let r = run_link(&ing, &link);
-        assert_eq!((r.state.as_str(), r.placement.as_deref()), ("done", Some("reference")), "{:?}", r.error);
+        assert_eq!((r.state.as_str(), r.placement.as_deref()), ("done", Some("symlink")), "{:?}", r.error);
         assert!(r.hash.as_deref().unwrap().starts_with("fp:"));
+        assert!(std::fs::symlink_metadata(&link).is_err(), "the link left the ingest dir");
         let conn = ing.db.conn().unwrap();
         let repo = Repo::new(&conn);
         let f = repo.get_file(r.file_id.as_ref().unwrap()).unwrap();
         assert_eq!((f.location.as_str(), f.hash_state.as_str()), ("external", "pending"));
-        assert_eq!(f.store_path, "Movies/Ref Movie (2010).mkv");
-        assert_eq!(f.fingerprint.as_deref().map(str::len), Some(64));
-        assert_eq!(ing.file_path(&f).unwrap(), ext.join(&f.store_path));
-        // nothing was placed in the store (only the staging dir exists)
-        assert!(std::fs::read_dir(ing.store.root()).unwrap().flatten().all(|e| e.file_name() == ".staging"));
-        assert!(std::fs::symlink_metadata(&link).unwrap().file_type().is_symlink(), "the link stays");
+        assert!(f.store_path.starts_with("fp/"), "{}", f.store_path);
+        let entry = ing.store.abs(&f.store_path);
+        let em = std::fs::symlink_metadata(&entry).unwrap();
+        assert!(em.file_type().is_symlink() && em.ino() == link_ino, "the link itself was renamed");
+        assert_eq!(std::fs::read_link(&entry).unwrap(), target);
+        assert_eq!(ing.file_path(&f).unwrap(), entry);
+        assert_eq!(std::fs::read(&entry).unwrap(), std::fs::read(&target).unwrap(), "reads resolve through the link");
 
-        // the same link again is a duplicate by fingerprint
+        // the same target linked again is a duplicate by fingerprint, and stays in the ingest dir
         let link2 = ing.ingest_dir.join("Same Again.mkv");
         std::os::unix::fs::symlink(&target, &link2).unwrap();
         assert_eq!(run_link(&ing, &link2).state, "duplicate");
+        assert!(std::fs::symlink_metadata(&link2).is_ok());
 
-        // lazy hash: pending -> full, equal to the real BLAKE3
+        // lazy hash: pending -> full (equal to the real BLAKE3) and the store symlink moves to its hash path
         assert_eq!(repo.count_pending_hashes().unwrap(), 1);
         assert!(matches!(ing.hash_one_pending(&[]).unwrap(), lazy::Step::Done));
         let f2 = repo.get_file(&f.id).unwrap();
         assert_eq!(f2.hash_state, "full");
         assert_eq!(f2.hash, store::hash_file(&target).unwrap().0);
         assert_eq!(f2.id, f.id);
+        assert_eq!(f2.store_path, Store::rel_path(&f2.hash, "mkv"));
+        assert!(std::fs::symlink_metadata(&entry).is_err(), "interim path is gone");
+        let entry2 = ing.store.abs(&f2.store_path);
+        assert!(std::fs::symlink_metadata(&entry2).unwrap().file_type().is_symlink());
+        assert_eq!(std::fs::read_link(&entry2).unwrap(), target);
         assert!(matches!(ing.hash_one_pending(&[]).unwrap(), lazy::Step::Idle));
 
-        // deleting removes only database rows
+        // deleting removes the store symlink only
         let d = ing.delete_item(&f.item_id).unwrap();
         assert_eq!(d.files, 1);
         assert!(repo.find_file(&f.id).unwrap().is_none());
+        assert!(std::fs::symlink_metadata(&entry2).is_err());
         let after = std::fs::metadata(&target).unwrap();
         assert!(target.exists());
         assert_eq!((before.mtime(), before.mtime_nsec(), before.ino(), before.len()), (after.mtime(), after.mtime_nsec(), after.ino(), after.len()));
-        assert_eq!(after.permissions().mode() & 0o777, 0o444);
+        assert_eq!(after.permissions().mode() & 0o777, 0o444, "never chmod'ed through the link");
         assert_eq!(std::fs::metadata(ext.join("Movies")).unwrap().permissions().mode() & 0o777, 0o555);
         drop(conn);
         std::fs::set_permissions(ext.join("Movies"), std::fs::Permissions::from_mode(0o755)).unwrap();
@@ -756,54 +764,106 @@ mod tests {
     }
 
     #[test]
-    fn reference_rejects_outside_dangling_nonfile_and_unconfigured() {
+    fn relative_symlink_is_recreated_absolute() {
+        let (root, ext, ing) = setup_ext("rel");
+        let target = ext.join("Movies/Rel Movie (2011).mkv");
+        make_media(&target, true, 1);
+        std::fs::create_dir_all(ing.ingest_dir.join("deep")).unwrap();
+        let link = ing.ingest_dir.join("deep/Rel Movie (2011).mkv");
+        // relative to the link's own directory
+        let rel = pathdiff(&target, &ing.ingest_dir.join("deep"));
+        std::os::unix::fs::symlink(&rel, &link).unwrap();
+        assert!(std::fs::read_link(&link).unwrap().is_relative());
+        let r = run_link(&ing, &link);
+        assert_eq!(r.state, "done", "{:?}", r.error);
+        assert!(std::fs::symlink_metadata(&link).is_err(), "ingest entry removed");
+        let conn = ing.db.conn().unwrap();
+        let f = Repo::new(&conn).get_file(r.file_id.as_ref().unwrap()).unwrap();
+        let entry = ing.store.abs(&f.store_path);
+        let t = std::fs::read_link(&entry).unwrap();
+        assert!(t.is_absolute() && t == std::fs::canonicalize(&target).unwrap(), "{t:?}");
+        assert!(std::fs::metadata(&entry).unwrap().is_file(), "resolves from the store location");
+        drop(conn);
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    /// `to` relative to the directory `from` (both absolute, no symlinks involved).
+    fn pathdiff(to: &Path, from: &Path) -> PathBuf {
+        let (t, f): (Vec<_>, Vec<_>) = (to.components().collect(), from.components().collect());
+        let common = t.iter().zip(&f).take_while(|(a, b)| a == b).count();
+        let mut out = PathBuf::new();
+        for _ in common..f.len() {
+            out.push("..");
+        }
+        for c in &t[common..] {
+            out.push(c);
+        }
+        out
+    }
+
+    #[test]
+    fn dangling_and_non_file_symlinks_fail_and_stay() {
         let (root, ext, ing) = setup_ext("refbad");
-        // outside EXTERNAL_ROOT (also via a sibling dir sharing the name prefix)
-        let outside = root.join("other/x.mkv");
-        make_media(&outside, true, 1);
-        let l1 = ing.ingest_dir.join("outside.mkv");
-        std::os::unix::fs::symlink(&outside, &l1).unwrap();
-        let r = run_link(&ing, &l1);
-        assert_eq!(r.state, "failed");
-        assert!(r.error.as_deref().unwrap().contains("outside EXTERNAL_ROOT"), "{:?}", r.error);
-        // a link inside the root that points out through ..
-        std::os::unix::fs::symlink(&outside, ext.join("sneaky.mkv")).unwrap();
-        let l1b = ing.ingest_dir.join("sneaky.mkv");
-        std::os::unix::fs::symlink(ext.join("sneaky.mkv"), &l1b).unwrap();
-        assert!(run_link(&ing, &l1b).error.unwrap().contains("outside EXTERNAL_ROOT"));
-        // dangling
         let l2 = ing.ingest_dir.join("dangling.mkv");
         std::os::unix::fs::symlink(ext.join("nope.mkv"), &l2).unwrap();
         let r = run_link(&ing, &l2);
         assert_eq!(r.state, "failed");
         assert!(r.error.as_deref().unwrap().contains("dangling"), "{:?}", r.error);
-        // directory
+        assert!(std::fs::symlink_metadata(&l2).is_ok(), "entry left in place");
         std::fs::create_dir_all(ext.join("dir.mkv")).unwrap();
         let l3 = ing.ingest_dir.join("dir.mkv");
         std::os::unix::fs::symlink(ext.join("dir.mkv"), &l3).unwrap();
         assert!(run_link(&ing, &l3).error.unwrap().contains("not a regular file"));
+        assert!(std::fs::symlink_metadata(&l3).is_ok());
         let conn = ing.db.conn().unwrap();
         assert_eq!(Repo::new(&conn).file_count().unwrap(), 0, "nothing catalogued");
         drop(conn);
         std::fs::remove_dir_all(&root).unwrap();
+    }
 
-        // feature off
-        let (root, _ext, ing) = {
-            let (root, ext, _) = setup_ext("refoff");
-            let mut cfg = Config::from_env();
-            cfg.ingest_dir = root.join("ingest");
-            cfg.media_dir = root.join("store2");
-            cfg.data_dir = root.join("data");
-            let db = Db::open(&cfg.data_dir.join("t2.db")).unwrap();
-            (root, ext.clone(), Ingest::new(db, &cfg).unwrap())
+    #[test]
+    fn old_external_layout_is_migrated() {
+        let (root, ext, ing) = setup_ext("mig");
+        let target = ext.join("Movies/Old Ref (2009).mkv");
+        make_media(&target, true, 1);
+        let link = ing.ingest_dir.join("Old Ref (2009).mkv");
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+        let r = run_link(&ing, &link);
+        assert_eq!(r.state, "done", "{:?}", r.error);
+        let conn = ing.db.conn().unwrap();
+        let repo = Repo::new(&conn);
+        let f = repo.get_file(r.file_id.as_ref().unwrap()).unwrap();
+        let new_entry = ing.store.abs(&f.store_path);
+
+        // recreate the old layout: relative store_path, no store entry, user symlink back in ingest
+        let ctx = |f: &crate::model::MediaFile| {
+            std::fs::remove_file(ing.store.abs(&f.store_path)).ok();
+            repo.set_store_path(&f.id, "Movies/Old Ref (2009).mkv").unwrap();
+            std::os::unix::fs::symlink(&target, &link).unwrap_or(());
         };
-        let t = root.join("ext/a.mkv");
-        make_media(&t, true, 1);
-        let l = ing.ingest_dir.join("a.mkv");
-        std::os::unix::fs::symlink(&t, &l).unwrap();
-        let r = run_link(&ing, &l);
-        assert_eq!(r.state, "failed");
-        assert!(r.error.unwrap().contains("EXTERNAL_ROOT is not configured"));
+        ctx(&f);
+        assert!(std::fs::symlink_metadata(&new_entry).is_err());
+        // 1) no env root: derived from the ingest symlink
+        assert_eq!(migrate::migrate_with(&repo, &ing.store, None).unwrap(), 1);
+        let f1 = repo.get_file(&f.id).unwrap();
+        assert_eq!(f1.store_path, f.store_path);
+        assert_eq!(std::fs::read_link(&new_entry).unwrap(), std::fs::canonicalize(&target).unwrap());
+        assert!(std::fs::symlink_metadata(&link).is_err(), "leftover ingest symlink removed");
+        assert!(target.exists());
+        // idempotent
+        assert_eq!(migrate::migrate_with(&repo, &ing.store, None).unwrap(), 0);
+        // 2) with the old root and no ingest symlink left
+        ctx(&f1);
+        assert!(std::fs::symlink_metadata(&link).is_ok());
+        std::fs::remove_file(&link).unwrap();
+        assert_eq!(migrate::migrate_with(&repo, &ing.store, None).unwrap(), 0, "nothing to derive the target from");
+        assert_eq!(repo.get_file(&f.id).unwrap().store_path, "Movies/Old Ref (2009).mkv");
+        assert_eq!(migrate::migrate_with(&repo, &ing.store, Some(&ext)).unwrap(), 1);
+        assert_eq!(repo.get_file(&f.id).unwrap().store_path, f.store_path);
+        assert_eq!(std::fs::read_link(&new_entry).unwrap(), std::fs::canonicalize(&target).unwrap());
+        assert_eq!(ing.file_path(&repo.get_file(&f.id).unwrap()).unwrap(), new_entry);
+        assert!(std::fs::metadata(&new_entry).unwrap().is_file());
+        drop(conn);
         std::fs::remove_dir_all(&root).unwrap();
     }
 

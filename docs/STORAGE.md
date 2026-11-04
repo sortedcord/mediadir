@@ -6,8 +6,8 @@ tools. Media enters through one of two doors and lives in a private, content-add
 ## Configuration
 | env | meaning | default |
 |---|---|---|
-| `INGEST_DIR` | The only directory MediaDir watches. Drop media files anywhere inside it (any depth, any structure). | `./ingest` |
-| `MEDIA_DIR` | MediaDir's private store. Not for humans; nothing watches it. | `./store` |
+| `INGEST_DIR` | The only directory MediaDir watches. Pure drop zone: drop media files anywhere inside it (any depth, any structure); ingested entries are *moved out*, so it ends up empty. **Must be on the same filesystem as `MEDIA_DIR`** (checked at startup; the server refuses to start otherwise). | `./ingest` |
+| `MEDIA_DIR` | MediaDir's private store. Not for humans; nothing watches it. Same filesystem as `INGEST_DIR`. | `./store` |
 | `ASSET_DIR` | Content-addressed image assets (see [Image assets](#image-assets)). Separate from `MEDIA_DIR`; must not contain or be inside `INGEST_DIR`/`MEDIA_DIR`. | `./assets` |
 | `ASSET_DEFAULT_WIDTH` | Output width of an asset transform request that gives neither `w` nor `h`. | `1280` |
 | `ASSET_GC_INTERVAL` | Seconds between unreferenced-asset garbage collection runs (`0` = off). | `3600` |
@@ -17,8 +17,7 @@ tools. Media enters through one of two doors and lives in a private, content-add
 | `INGEST_SETTLE_SECS` | A file must be unchanged (size + mtime) this long before it's ingested, so partial downloads/copies are never taken. | `10` |
 | `SIDECAR_INTERVAL` | Seconds between sidecar manifest sync runs. | `3600` |
 | `VERIFY_INTERVAL` | Seconds between integrity check runs. | `86400` |
-| `EXTERNAL_ROOT` | Optional. Root of [referenced media](#referenced-media): symlinks in `INGEST_DIR` to files under it are catalogued in place. Unset = feature off. May be a read-only mount. Must not contain/be inside `MEDIA_DIR`, `ASSET_DIR` or `DATA_DIR`. | unset |
-| `LAZY_HASH_MB_S` | Read-rate cap (MiB/s) of the background full hash of referenced files (`0` = unlimited). | `64` |
+| `LAZY_HASH_MB_S` | Read-rate cap (MiB/s) of the background full hash of symlinked files (`0` = unlimited). | `64` |
 | `ANALYTICS_SNAPSHOT_SECS` | Seconds between [analytics](#analytics-storage) library snapshots (`0` = only the one taken at startup). | `3600` |
 | `ANALYTICS_RAW_DAYS` | Raw request-log rows are deleted after this many days; hourly aggregates and snapshots are kept forever. | `30` |
 | `ANALYTICS_PLAYBACK_IDLE_SECS` | A playback session closes after this long without `/stream` requests or playback events. | `300` |
@@ -26,8 +25,8 @@ tools. Media enters through one of two doors and lives in a private, content-add
 | `BACKUP_INTERVAL` / `BACKUP_KEEP` | Database backup cadence (seconds) and how many to keep. | `21600` / `14` |
 
 ## Two ways in
-1. **Ingest directory.** Watched recursively (inotify via `notify`, plus polling). Every regular file
-   whose extension is a known video/audio extension and which ffprobe can open is ingested.
+1. **Ingest directory.** Watched recursively (inotify via `notify`, plus polling). Every regular file,
+   hardlink or symlink whose name has a known video/audio extension and which ffprobe can open is ingested.
    Everything else (nfo, images, subtitles, text, partial `*.part`/`*.crdownload`/`*.tmp`, hidden files) is ignored.
 2. **Upload.** `POST /api/ingest/upload` with the raw file as the request body and the original file
    name in `X-Filename` (URL-encoded). Streamed to `MEDIA_DIR/.staging/` and then goes through the
@@ -36,11 +35,16 @@ tools. Media enters through one of two doors and lives in a private, content-add
 ## Pipeline (per file)
 1. **Settle** — wait until size+mtime are stable for `INGEST_SETTLE_SECS`.
 2. **Hash** — BLAKE3 of the full content (streamed). The hash is the file's identity.
-3. **Place** into the store at `MEDIA_DIR/<h[0..2]>/<h[2..4]>/<hash>.<ext>`:
-   reflink (FICLONE) → hardlink → move. Never copy, never symlink. Ingest-dir files that were
-   linked stay where they are; moved ones disappear from the ingest dir (only when linking failed).
-   Stored files are made read-only (0444), the store tree is 0700.
-   If the hash is already in the store, the file is a duplicate: nothing is placed, it is recorded as `duplicate`.
+3. **Place** into the store at `MEDIA_DIR/<h[0..2]>/<h[2..4]>/<hash>.<ext>` with **one `rename(2)` of the
+   directory entry** out of `INGEST_DIR` (same filesystem, so no bytes are copied and the inode is kept):
+   - a regular file is renamed into the store;
+   - a hardlink: that link is renamed into the store (other links elsewhere stay; they and the store entry share the inode);
+   - a symlink: the **symlink itself** is renamed into the store, never its target (see [Symlinked media](#symlinked-media)).
+   Uploads are staged in `MEDIA_DIR/.staging/` and renamed the same way. MediaDir never chmods stored files (there is
+   no read-only protection); store directories are 0700. After the move, folders in `INGEST_DIR` that became empty
+   are removed (`INGEST_DIR` itself stays).
+   If the hash is already known, the file is a duplicate: nothing is placed, it is recorded as `duplicate` and the entry
+   stays in `INGEST_DIR`. The same holds for `ignored` and `failed` entries.
 4. **Probe** — ffprobe for technical streams only (codecs, resolution, fps, duration, tracks).
 5. **Name → item** — the **file name is the only metadata source** (no folders, no nfo, no tags, no artwork files):
    - `…S01E02…` / `1x02` / multi-episode → `show` › `season` › `episode` (show title from the part before the pattern)
@@ -56,8 +60,9 @@ tools. Media enters through one of two doors and lives in a private, content-add
 
 Ingest records (`GET /api/ingest`): `{ id, source, size, hash, state, error, item_id, ingested_at }` with
 `state ∈ waiting | hashing | placing | probing | done | duplicate | failed | ignored`.
-The ingest dir is tracked by `(device, inode, size, mtime)` so linked originals that remain in the
-ingest dir are never ingested twice, across restarts too.
+`placement` is `move` (regular file/hardlink) or `symlink`. Entries that stay in the ingest dir (duplicates,
+ignored, failed) are tracked by `(device, inode, size, mtime)` in `seen_files`, so they are never processed twice
+(failures are not retried endlessly; `POST /api/ingest/scan` forgets failures once and retries them), across restarts too.
 
 ## Image assets
 Images are not special slots. They are values of ordinary fields of type `image` (create the field
@@ -104,46 +109,54 @@ chooses, ranks or falls back between images; the client decides which one is sho
   `item_id`. The `assets` table is part of the database backups; back up `ASSET_DIR` together with `MEDIA_DIR`.
   No sidecars are written for assets (the file name is the hash, the mime is the extension).
 
-## Referenced media
-For big libraries that already live on another disk (e.g. `/mnt/sdb1/Movies`), MediaDir can catalogue
-files **in place** instead of owning a copy. One external root is configured with `EXTERNAL_ROOT`; the
-user then places a **symlink** in `INGEST_DIR` pointing at a file under it:
+## Symlinked media
+For big libraries that already live on another disk (e.g. `/mnt/sdb1/Movies`), drop a **symlink** in `INGEST_DIR`
+instead of the file. "External" simply means *the store entry is a symlink*:
 
 ```sh
 ln -s /mnt/sdb1/Movies/Some.Film.2012.mkv "$INGEST_DIR/"      # the link's name is the file name used for naming
 ```
 
-- **Never touched.** A reference is not reflinked, hardlinked, moved or copied, and MediaDir never
-  writes to, chmods or deletes the target or anything under `EXTERNAL_ROOT` (read-only mounts work).
-  Everything else is the normal pipeline: settle → identify → ffprobe → name → item. The link is
-  remembered in `seen_files` (like a hardlinked original) so it is not imported twice; it is left in place.
-- **Rejected with an ingest record error** (`state: failed`, nothing catalogued): a symlink whose
-  canonicalized target is outside `EXTERNAL_ROOT` (symlink chains and `..` are resolved first), a dangling
-  link, a target that is not a regular file, or any symlink while `EXTERNAL_ROOT` is unset. Fix the link and
-  `POST /api/ingest/scan` (or replace it) to retry. Non-symlink files behave exactly as before.
-- **Row.** `media_files` gets `location` (`store` | `external`), `hash_state` (`full` | `pending`),
-  `fingerprint` and `src_mtime` (columns are added by an idempotent startup migration; existing rows are
-  `store`/`full`). For external files `store_path` is relative to `EXTERNAL_ROOT`.
-- **Lazy hashing.** Hashing a multi-GB file over a slow disk at ingest would block cataloguing, so a reference
-  gets a **fingerprint** = BLAKE3 over a domain tag, the file size, the first 4 MiB and the last 4 MiB (files
-  <= 8 MiB are read whole). Until the full hash is known the unique `hash` column holds `fp:<64 hex>`
-  (prefixed so it can never equal a real BLAKE3) with `hash_state = pending`; it is the file's identity and the
-  dedup key (the same target linked twice is a `duplicate`). A background task, **one file at a time and
-  rate-limited** (`LAZY_HASH_MB_S`), computes the full BLAKE3 and replaces `hash` with it
-  (`hash_state = full`); the file/item ids never change. If the full hash equals an already catalogued file
-  (e.g. the same movie also lives in the store) the referenced row is a duplicate: it is dropped (and its item
-  too, if it had no other files; database rows only), and its ingest records become `duplicate` of the existing
-  file. The fingerprint is not a content guarantee (a change in the middle with identical size and edges is
-  not seen) — that is why the full hash follows. Once `full`, the file joins the normal full-rehash rotation.
-- **Serving.** `/stream` (HTTP Range), ffprobe and `/frame` read straight from `EXTERNAL_ROOT/<store_path>`.
-- **Deleting** (`DELETE /api/items/{id}` / `/api/files/{id}`) removes only database rows and DATA_DIR
-  caches; the target and the symlink are left alone (the symlink is not re-imported).
-- **Integrity.** Every verify run checks each referenced file's existence, size and mtime. Missing is
-  reported as `missing`; a changed size/mtime is reported as `changed` (once), the file is re-fingerprinted
-  and its hash goes back to `pending` (size updated; it is not re-probed). Nothing is ever deleted.
-- **Sidecars.** Not written for referenced files (nothing is written next to or about them; the database
-  and its backups are the source of truth for them).
-- **Status.** `GET /api/ingest/status` includes `external_root` and `pending_hashes`.
+- **The link moves, the target never does.** The symlink itself is renamed into the store (`rename(2)`, like any
+  entry) and `INGEST_DIR` loses it. Metadata for probing, fingerprinting and hashing comes from the target, but
+  MediaDir never copies, moves, writes or chmods the target (nor chmods through the link); read-only mounts work.
+  A link with a **relative** target is re-created in the store with the absolute, canonical target (so it still
+  resolves from there) and the ingest entry is removed. Then the usual pipeline: settle → identify → ffprobe → name → item.
+- **Failures** (`state: failed`, nothing catalogued, entry left in `INGEST_DIR`, not retried until you fix it and
+  `POST /api/ingest/scan`): a dangling link, a target that is not a regular file.
+- **Row.** `media_files` has `location` (`store` | `external`; `external` = the store entry is a symlink),
+  `hash_state` (`full` | `pending`), `fingerprint` and `src_mtime` (added by an idempotent startup migration).
+  `store_path` is relative to `MEDIA_DIR` like any other file.
+- **Lazy hashing.** Hashing a multi-GB file over a slow disk at ingest would block cataloguing, so a symlink gets a
+  **fingerprint** = BLAKE3 over a domain tag, the file size, the first 4 MiB and the last 4 MiB (files <= 8 MiB are
+  read whole). Until the full hash is known the unique `hash` column holds `fp:<64 hex>` (prefixed so it can never
+  equal a real BLAKE3) with `hash_state = pending`, and the store symlink lives at `fp/<fp[0..2]>/<fp>.<ext>`; the
+  fingerprint is the file's identity and dedup key (the same target linked twice is a `duplicate`). A background
+  task, **one file at a time and rate-limited** (`LAZY_HASH_MB_S`), computes the full BLAKE3, replaces `hash` with
+  it (`hash_state = full`) and **renames the store symlink to its final hash-based path**
+  (`<h[0..2]>/<h[2..4]>/<hash>.<ext>`, updating `store_path`); file/item ids never change. If the full hash equals an
+  already catalogued file the symlinked row is a duplicate: it is dropped (and its item too, if it had no other
+  files; database rows only), its store symlink is removed (never the target), and its ingest records become
+  `duplicate` of the existing file. The fingerprint is not a content guarantee (a change in the middle with
+  identical size and edges is not seen) — that is why the full hash follows. Once `full`, the file joins the normal
+  full-rehash rotation.
+- **Serving.** `/stream` (HTTP Range), ffprobe and `/frame` read through the store symlink.
+- **Deleting** (`DELETE /api/items/{id}` / `/api/files/{id}`) removes the store entry: for a symlink only the link,
+  never the target.
+- **Integrity.** Every verify run checks the target's existence, size and mtime. Missing is reported as `missing`; a
+  changed size/mtime is reported as `changed` (once), the file is re-fingerprinted and its hash goes back to `pending`
+  (size updated; it is not re-probed). Nothing is ever deleted.
+- **Sidecars.** Not written for symlinked entries (nothing is written next to or about them; the database and its
+  backups are the source of truth for them).
+- **Status.** `GET /api/ingest/status` includes `pending_hashes`.
+- **Migration from `EXTERNAL_ROOT`.** Earlier versions kept the symlink in `INGEST_DIR` and stored `store_path`
+  relative to an `EXTERNAL_ROOT`. At startup, every `external` row whose store entry is not a symlink yet is converted:
+  a store symlink is created (absolute target = `EXTERNAL_ROOT` env var if still set + old `store_path`, otherwise
+  derived from the leftover ingest symlink recorded in the ingest records), `store_path` is set to the store-relative
+  path, and the leftover ingest symlink is removed. It is idempotent, logged (`migrate: …`), and never touches targets.
+  Rows that cannot be resolved (neither the env var nor the ingest symlink available) are reported and retried on the
+  next start. `EXTERNAL_ROOT` is read only for this and can be dropped afterwards. Hashed regular files that earlier
+  versions left in `INGEST_DIR` as hardlink originals are not migrated: they stay where they are.
 
 ## Analytics storage
 Observability data lives in its own SQLite file, `DATA_DIR/analytics.db` (WAL), so the main database and
@@ -168,9 +181,9 @@ hour × route group × route template × status class × device × user), `devic
   `anon:<client ip>`. The IP is the first `X-Forwarded-For` / `X-Real-IP` value if present, else the socket peer.
 
 ## Deleting
-`DELETE /api/items/{id}` removes the item (and its children) and every stored file that is no longer
-referenced. Files left in the ingest dir are untouched and are **not** re-ingested (their inode is remembered).
-`DELETE /api/files/{id}` removes one version. [Referenced](#referenced-media) files only lose their database rows.
+`DELETE /api/items/{id}` removes the item (and its children) and removes each of their store entries: a regular
+file is deleted, a hardlinked file loses only that link (other links keep the data), a [symlink](#symlinked-media)
+loses only the link (the target is never touched). `DELETE /api/files/{id}` removes one version.
 
 ## Libraries
 Libraries are virtual: one per item kind that has items (`movies`, `shows`, `music`, `music_videos`,

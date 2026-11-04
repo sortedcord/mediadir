@@ -45,7 +45,6 @@ impl Analytics {
                 data: cfg.data_dir.clone(),
                 media: cfg.media_dir.clone(),
                 assets: cfg.asset_dir.clone(),
-                external: cfg.external_root.clone(),
             },
         }))
     }

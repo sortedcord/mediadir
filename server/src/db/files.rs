@@ -161,6 +161,19 @@ impl Repo<'_> {
         }
     }
 
+    /// The store entry was renamed (pending `fp:` path -> final hash path) or migrated.
+    pub fn set_store_path(&self, id: &str, store_path: &str) -> AppResult<()> {
+        self.conn.execute("UPDATE media_files SET store_path = ?2 WHERE id = ?1", params![id, store_path])?;
+        Ok(())
+    }
+
+    /// Ingest-dir paths that produced this file (newest first), for the old-layout migration.
+    pub fn ingest_sources_for_file(&self, file_id: &str) -> AppResult<Vec<String>> {
+        let mut st = self.conn.prepare("SELECT source FROM ingests WHERE file_id = ?1 AND origin = 'ingest' AND state = 'done' ORDER BY ingested_at DESC")?;
+        let rows = st.query_map([file_id], |r| r.get::<_, String>(0))?.collect::<Result<Vec<_>, _>>()?;
+        Ok(rows)
+    }
+
     /// Ingest records that produced `old_file` now describe a duplicate of `file`.
     pub fn repoint_ingests(&self, old_file: &str, item_id: &str, file_id: &str) -> AppResult<()> {
         self.conn.execute(

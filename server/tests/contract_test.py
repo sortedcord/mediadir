@@ -8,9 +8,8 @@ short intervals so the periodic tasks run during the test:
   INGEST_SETTLE_SECS=1 INGEST_POLL_SECS=2 SIDECAR_INTERVAL=2 VERIFY_INTERVAL=3 BACKUP_INTERVAL=3
   ASSET_GC_INTERVAL=2 ASSET_GC_GRACE_SECS=6 ASSET_DIR=<fresh dir> ASSET_DEFAULT_WIDTH=1280
   ANALYTICS_PLAYBACK_IDLE_SECS=3 ANALYTICS_DEVICE_IDLE_SECS=4 ANALYTICS_SNAPSHOT_SECS=2
-Optional, for the referenced-media tests (skipped when unset): EXTERNAL_ROOT=<fresh dir>
-(must not overlap the other dirs; it may be read-only apart from what the test itself does to
-create/remove its fixtures there).
+INGEST_DIR and MEDIA_DIR must be on one filesystem (placement is a rename); the test's scratch
+dir is created next to INGEST_DIR, so symlink/hardlink fixtures live on that filesystem too.
 
 The test builds unique copies of testmedia/ (remuxed with -c copy, so every file has its own
 hash), copies them into the server's INGEST_DIR, uploads more through the API and checks the
@@ -292,7 +291,7 @@ def main():
         assert set(by_src) == set(media), (set(by_src) ^ set(media))
         for rel, r in by_src.items():
             assert r["state"] == "done", (rel, r["state"], r["error"])
-            assert r["placement"] in ("hardlink", "reflink"), r["placement"]
+            assert r["placement"] == "move", r["placement"]
             assert is_id(r["item_id"]) and len(r["hash"]) == 64
         # newest first, state filter
         ts = [r["ingested_at"] for r in recs]
@@ -310,14 +309,18 @@ def main():
             f = get(f"/api/items/{r['item_id']}")["files"]
             f = find(f, id=r["file_id"])
             blob = blob_path(state["media_dir"], f)
-            so, sb = os.stat(orig), os.stat(blob)
-            if r["placement"] == "hardlink":
-                assert so.st_ino == sb.st_ino and sb.st_nlink == 2, rel
-            assert stat.S_IMODE(sb.st_mode) == 0o444, oct(sb.st_mode)
+            sb = os.lstat(blob)
+            assert stat.S_ISREG(sb.st_mode) and sb.st_nlink == 1, rel
+            assert not os.path.lexists(orig), f"{rel} must have left the ingest dir"
             assert stat.S_IMODE(os.stat(os.path.dirname(blob)).st_mode) == 0o700
             assert sb.st_size == f["size"] == r["size"]
         assert os.listdir(os.path.join(state["media_dir"], ".staging")) == []
-    check("store: content-addressed, hardlinked, 0444 files, 0700 dirs", t_store)
+        # the ingest dir is a pure drop zone: no media files and no leftover (empty) folders
+        left = [os.path.join(d, n) for d, _, fs_ in os.walk(state["ingest_dir"]) for n in fs_
+                if n.rsplit(".", 1)[-1].lower() in MEDIA_EXTS and not n.startswith(".") and not n.endswith(".part")
+                and not any(p.startswith(".") for p in os.path.relpath(d, state["ingest_dir"]).split(os.sep))]
+        assert left == [], left
+    check("store: content-addressed, renamed in (ingest dir emptied of media), 0700 dirs", t_store)
 
     def t_libraries():
         libs = get("/api/libraries")
@@ -855,7 +858,7 @@ def main():
         assert (d["kind"], d["title"], d["year"]) == ("movie", "Uploaded Film", 2021)
         f = d["files"][0]
         blob = blob_path(state["media_dir"], f)
-        assert stat.S_IMODE(os.stat(blob).st_mode) == 0o444 and os.stat(blob).st_nlink == 1
+        assert os.stat(blob).st_nlink == 1 and stat.S_IMODE(os.stat(blob).st_mode) & 0o222, "stored files are not made read-only"
         assert os.listdir(os.path.join(state["media_dir"], ".staging")) == []
         assert get(f"/api/ingest/{rec['id']}")["state"] == "done"
         # a second file of the same movie: another version
@@ -909,13 +912,13 @@ def main():
         blob = blob_path(state["media_dir"], f)
         rel = os.path.join("videos", "Holiday 2023", "mountain.mkv")
         orig = os.path.join(state["ingest_dir"], rel)
-        assert os.stat(blob).st_ino == os.stat(orig).st_ino
+        assert os.path.isfile(blob) and not os.path.lexists(orig)
         r = req("DELETE", f"/api/items/{mountain['id']}", expect=200)[1]
         assert r["ok"] is True and r["files"] == 1, r
-        assert not os.path.exists(blob) and os.path.exists(orig)
+        assert not os.path.exists(blob) and not os.path.lexists(orig)
         assert req("GET", f"/api/items/{mountain['id']}")[0] == 404
         assert req("GET", f["stream_url"])[0] == 404
-        # the original stays in the ingest dir but is never ingested again
+        # nothing is left in the ingest dir, so nothing can be ingested again
         req("POST", "/api/ingest/scan", expect=202)
         time.sleep(4)
         wait_idle()
@@ -1220,13 +1223,10 @@ def main():
         assert status()["problems"] == []
     check("periodic tasks: sidecars (changed only), backups, integrity verify", t_tasks)
 
-    def t_external():
-        ext = status().get("external_root")
-        assert "pending_hashes" in status()
-        if not ext:
-            print("  ..   EXTERNAL_ROOT not set: referenced-media tests skipped")
-            return
+    def t_symlink():
         ing = state["ingest_dir"]
+        assert "external_root" not in status() and "pending_hashes" in status()
+        ext = os.path.join(work, "ext")  # a different tree than INGEST_DIR/MEDIA_DIR: where the media "lives"
         os.makedirs(os.path.join(ext, "Movies"), exist_ok=True)
         target = os.path.join(ext, "Movies", "Ref Film (2012).mkv")
         make_video(target, 320, 180, 777)
@@ -1234,30 +1234,41 @@ def main():
         st0 = os.stat(target)
         link = os.path.join(ing, "Ref Film (2012).mkv")
         os.symlink(target, link)
-        # rejected: outside the root, dangling
-        outside = os.path.join(work, "outside.mkv")
-        make_video(outside, 160, 90, 555)
-        os.symlink(outside, os.path.join(ing, "Outside Film (2011).mkv"))
-        os.symlink(os.path.join(ext, "nope.mkv"), os.path.join(ing, "Dangling Film (2010).mkv"))
+        link_ino = os.lstat(link).st_ino
+        # a relative link in a sub folder, a dangling one, and a hardlink to a file kept elsewhere
+        rtarget = os.path.join(ext, "Movies", "Relative Film (2014).mkv")
+        make_video(rtarget, 320, 180, 778)
+        os.makedirs(os.path.join(ing, "rel"))
+        rlink = os.path.join(ing, "rel", "Relative Film (2014).mkv")
+        os.symlink(os.path.relpath(rtarget, os.path.dirname(rlink)), rlink)
+        dlink = os.path.join(ing, "Dangling Film (2010).mkv")
+        os.symlink(os.path.join(ext, "nope.mkv"), dlink)
+        keep = os.path.join(ext, "Movies", "Hard Film (2015).mkv")
+        make_video(keep, 320, 180, 779)
+        hlink = os.path.join(ing, "Hard Film (2015).mkv")
+        os.link(keep, hlink)
+        keep_ino = os.stat(keep).st_ino
         before = len(get("/api/ingest?limit=1000"))
-        wait_idle(min_records=before + 3)
+        wait_idle(min_records=before + 4)
         recs = {os.path.basename(r["source"]): r for r in get("/api/ingest?limit=1000") if r["source"].startswith(ing)}
         r = recs["Ref Film (2012).mkv"]
-        assert r["state"] == "done" and r["placement"] == "reference", r
-        o = recs["Outside Film (2011).mkv"]
-        assert o["state"] == "failed" and "outside EXTERNAL_ROOT" in o["error"] and o["item_id"] is None, o
+        assert r["state"] == "done" and r["placement"] == "symlink", r
         d = recs["Dangling Film (2010).mkv"]
-        assert d["state"] == "failed" and "dangling" in d["error"], d
-        assert not items(q="Outside Film")["items"] and not items(q="Dangling Film")["items"]
-        # catalogued in place
+        assert d["state"] == "failed" and "dangling" in d["error"] and d["item_id"] is None, d
+        assert os.path.islink(dlink), "a failed entry stays in the ingest dir"
+        assert not items(q="Dangling Film")["items"]
+        # the link itself moved into the store; the ingest dir lost it, the target is untouched
+        assert not os.path.lexists(link)
         item = get(f"/api/items/{r['item_id']}")
         assert item["kind"] == "movie" and item["title"] == "Ref Film" and len(item["files"]) == 1
         f = item["files"][0]
         assert f["location"] == "external" and f["hash_state"] in ("pending", "full"), f
         assert f["original_name"] == "Ref Film (2012).mkv" and f["video"]["height"] == 180
-        assert os.path.islink(link), "the symlink stays"
-        assert not [n for n in os.listdir(state["media_dir"]) if n != ".staging" and os.path.exists(os.path.join(state["media_dir"], n, "x"))]
-        # stream + Range + frame work from the external path
+        if f["hash_state"] == "pending":
+            fp = f["hash"][3:]
+            e = os.path.join(state["media_dir"], "fp", fp[:2], fp + ".mkv")
+            assert os.path.islink(e) and os.lstat(e).st_ino == link_ino and os.readlink(e) == target, e
+        # stream + Range + frame work through the store symlink
         raw = open(target, "rb").read()
         st, h, body = req("GET", f["stream_url"], headers={"Range": "bytes=10-109"}, raw=True)
         assert st == 206 and body == raw[10:110] and h["Content-Range"] == f"bytes 10-109/{len(raw)}", (st, dict(h))
@@ -1265,33 +1276,56 @@ def main():
         assert body == raw
         st, h, body = req("GET", f"/frame/{f['id']}?t=0.5", raw=True, expect=200)
         assert body[:2] == b"\xff\xd8", "jpeg frame"
-        # lazy hash becomes the full hash; identity (file id) is unchanged
+        # lazy hash becomes the full hash, the store symlink is renamed to the hash path; identity unchanged
         def full():
             g = get(f"/api/items/{item['id']}")["files"][0]
             return g if g["hash_state"] == "full" else None
         g = wait_for(full, timeout=40, what="lazy full hash")
         assert g["id"] == f["id"] and len(g["hash"]) == 64 and not g["hash"].startswith("fp:"), g
+        e = blob_path(state["media_dir"], g)
+        assert os.path.islink(e) and os.readlink(e) == target, e
+        assert os.stat(e).st_ino == st0.st_ino
         assert status()["pending_hashes"] == 0
-        assert f["hash_state"] == "full" or f["hash"].startswith("fp:"), f
-        # sidecars are never written next to referenced files
+        assert req("GET", g["stream_url"], headers={"Range": "bytes=0-9"}, raw=True)[0] == 206
+        # relative link: re-created with an absolute target in the store, original gone
+        ri = wait_for(lambda: [x for x in items(q="Relative Film")["items"]], timeout=40, what="relative link ingested")[0]
+        rf = get(f"/api/items/{ri['id']}")["files"][0]
+        assert rf["location"] == "external" and not os.path.lexists(rlink)
+        wait_for(lambda: get(f"/api/items/{ri['id']}")["files"][0]["hash_state"] == "full", timeout=40, what="relative lazy hash")
+        rf = get(f"/api/items/{ri['id']}")["files"][0]
+        rl = os.readlink(blob_path(state["media_dir"], rf))
+        assert os.path.isabs(rl) and os.path.samefile(rl, rtarget)
+        assert req("GET", rf["stream_url"], headers={"Range": "bytes=0-9"}, raw=True)[0] == 206
+        assert not os.path.isdir(os.path.join(ing, "rel")), "emptied sub folder pruned"
+        # hardlink: the dropped link moved, the other link and the inode are intact
+        hi = wait_for(lambda: [x for x in items(q="Hard Film")["items"]], timeout=40, what="hardlink ingested")[0]
+        hf = get(f"/api/items/{hi['id']}")["files"][0]
+        assert hf["location"] == "store" and not os.path.lexists(hlink)
+        hb = blob_path(state["media_dir"], hf)
+        assert os.stat(hb).st_ino == keep_ino == os.stat(keep).st_ino and os.stat(keep).st_nlink == 2
+        # sidecars are never written for symlinked entries
         time.sleep(3)
-        assert sorted(os.listdir(os.path.join(ext, "Movies"))) == ["Ref Film (2012).mkv"]
-        # a changed file is flagged, re-fingerprinted (hash pending again) and hashed again
+        assert not os.path.exists(os.path.join(os.path.dirname(blob_path(state["media_dir"], g)), g["hash"] + ".json"))
+        assert sorted(os.listdir(os.path.join(ext, "Movies"))) == sorted(["Ref Film (2012).mkv", "Relative Film (2014).mkv", "Hard Film (2015).mkv"])
+        # a changed target is flagged, re-fingerprinted (hash pending again) and hashed again
         os.chmod(target, 0o644)
         os.utime(target, (st0.st_atime, st0.st_mtime + 100))
         os.chmod(target, 0o444)
         probs = wait_for(lambda: [p for p in status()["problems"] if p["file_id"] == f["id"]], timeout=30, what="changed file reported")
         assert probs[0]["problem"] == "changed" and probs[0]["item_id"] == item["id"], probs
         wait_for(full, timeout=40, what="hash after change")
-        # delete: database rows only; target and symlink untouched
+        # delete: the store symlink goes, the target never
         r2 = req("DELETE", f"/api/items/{item['id']}", expect=200)[1]
         assert r2["ok"] is True and r2["files"] == 1, r2
         assert req("GET", f"/api/items/{item['id']}")[0] == 404
-        assert os.path.isfile(target) and os.path.islink(link)
+        assert not os.path.lexists(e) and os.path.isfile(target)
         st1 = os.stat(target)
         assert (st1.st_size, st1.st_mode, st1.st_ino) == (st0.st_size, st0.st_mode, st0.st_ino)
         assert st1.st_mtime == st0.st_mtime + 100
         assert open(target, "rb").read() == raw
+        # deleting the hardlinked file removes only the store link
+        req("DELETE", f"/api/items/{hi['id']}", expect=200)
+        assert not os.path.lexists(hb) and os.stat(keep).st_ino == keep_ino and os.stat(keep).st_nlink == 1
         # a removed target is reported as missing (never deleted from our side)
         gone = os.path.join(ext, "Movies", "Gone Film (2013).mkv")
         make_video(gone, 160, 90, 333)
@@ -1306,7 +1340,11 @@ def main():
         assert req("GET", gf["stream_url"], raw=True)[0] == 404
         req("DELETE", f"/api/items/{gi['id']}", expect=200)
         wait_for(lambda: not [p for p in status()["problems"] if p["file_id"] == gf["id"]], what="problem cleared")
-    check("referenced media: symlink ingest, rejects, Range, frame, lazy hash, change/missing verify, delete keeps target", t_external)
+        req("DELETE", f"/api/items/{ri['id']}", expect=200)
+        assert os.path.isfile(rtarget)
+        # only the dangling link remains in the ingest dir
+        assert os.listdir(ing).count("Dangling Film (2010).mkv") == 1
+    check("rename placement: symlink (abs/relative/dangling), hardlink, Range, frame, lazy hash path, verify, delete keeps target", t_symlink)
 
     shutil.rmtree(work, ignore_errors=True)
     print(f"\n{PASSES} passed, {len(FAILS)} failed")

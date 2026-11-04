@@ -39,7 +39,7 @@ pub struct MediaFile {
     pub item_id: String,
     /// BLAKE3 of the content (hex): the file's identity.
     pub hash: String,
-    /// Relative to MEDIA_DIR (`<h[0..2]>/<h[2..4]>/<hash>.<ext>`), or to EXTERNAL_ROOT when `location` is external.
+    /// Relative to MEDIA_DIR: `<h[0..2]>/<h[2..4]>/<hash>.<ext>` (`fp/<fp[0..2]>/<fp>.<ext>` while the hash is pending).
     pub store_path: String,
     /// File name it arrived with (ingest dir or upload).
     pub original_name: String,
@@ -53,7 +53,7 @@ pub struct MediaFile {
     pub audio: Vec<AudioStream>,
     pub subtitles: Vec<SubtitleStream>,
     pub added_at: i64,
-    /// `store` (private blob under MEDIA_DIR) or `external` (referenced in place under EXTERNAL_ROOT).
+    /// `store` (the store entry is a regular file) or `external` (the store entry is a symlink to media living elsewhere).
     pub location: String,
     /// `full` (`hash` is the BLAKE3 of the content) or `pending` (`hash` is `fp:<fingerprint>`).
     pub hash_state: String,

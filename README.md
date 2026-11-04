@@ -4,7 +4,7 @@ A Rust media server and native Android client. The server manages original media
 
 ## Run the server
 
-Requires Rust, ffmpeg, and ffprobe on PATH. Storage placement uses Unix filesystem APIs (Linux reflinks when supported).
+Requires Rust, ffmpeg, and ffprobe on PATH. Storage placement uses Unix filesystem APIs (rename, symlinks).
 
 ```sh
 cd server
@@ -26,7 +26,7 @@ cd server
 cargo build --release
 ```
 
-Pick four directories on persistent storage, ideally on the same filesystem so ingest can reflink instead of copying. `MEDIA_DIR` and `ASSET_DIR` hold the originals; back them up together with `DATA_DIR` (the database, with rolling backups in `DATA_DIR/backups`).
+Pick four directories on persistent storage. **`INGEST_DIR` and `MEDIA_DIR` must be on the same filesystem**: ingest moves each dropped entry into the store with a single `rename(2)` (no copy), so the ingest folder ends up empty; the server refuses to start otherwise. `MEDIA_DIR` and `ASSET_DIR` hold the originals; back them up together with `DATA_DIR` (the database, with rolling backups in `DATA_DIR/backups`).
 
 | Variable | Purpose |
 |---|---|
@@ -34,8 +34,7 @@ Pick four directories on persistent storage, ideally on the same filesystem so i
 | `DATA_DIR` | Database, frame and image caches, backups |
 | `MEDIA_DIR` | Content-addressed media store |
 | `ASSET_DIR` | Content-addressed image store (must not overlap ingest/media) |
-| `INGEST_DIR` | Drop folder watched for new media |
-| `EXTERNAL_ROOT` | Optional. Reference media in place on another disk: `ln -s /mnt/sdb1/Movies/x.mkv $INGEST_DIR/` (symlink target must be under this root; never copied, moved or written; may be read-only). See [docs/STORAGE.md](docs/STORAGE.md#referenced-media) |
+| `INGEST_DIR` | Drop folder watched for new media; entries are moved out into the store (must be on the same filesystem as `MEDIA_DIR`). To catalogue media that lives on another disk without copying it, drop a symlink: `ln -s /mnt/sdb1/Movies/x.mkv $INGEST_DIR/` (the link moves into the store; the target is never touched). See [docs/STORAGE.md](docs/STORAGE.md#symlinked-media) |
 | `ANALYTICS_SNAPSHOT_SECS` / `ANALYTICS_RAW_DAYS` | Analytics: library snapshot cadence (default `3600`) and raw request-log retention in days (default `30`; aggregates are kept forever). Data lives in `DATA_DIR/analytics.db`, API under `/api/analytics/*` (see [docs/API.md](docs/API.md#analytics)) |
 | `ANALYTICS_PLAYBACK_IDLE_SECS` / `ANALYTICS_DEVICE_IDLE_SECS` | Inactivity after which a playback session (default `300`) / device session (default `1800`) closes |
 

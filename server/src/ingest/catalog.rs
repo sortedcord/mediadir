@@ -21,7 +21,7 @@ pub struct StoredFile {
     pub ext: String,
     pub size: u64,
     pub probe: ProbeResult,
-    /// `store` or `external`.
+    /// `store` or `external` (the store entry is a symlink).
     pub location: String,
     /// `full` or `pending`.
     pub hash_state: String,
