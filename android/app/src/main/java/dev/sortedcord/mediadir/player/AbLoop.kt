@@ -62,6 +62,7 @@ class AbLoop(
         val item = currentItem() ?: return
         shadow = newPlayer().apply {
             volume = 0f
+            setSeekParameters(androidx.media3.exoplayer.SeekParameters.EXACT)
             setVideoTextureView(tv)
             setMediaItem(item, a)
             playWhenReady = false
@@ -96,7 +97,7 @@ class AbLoop(
         val s = shadow ?: return
         val (playing, parked) = if (shadowActive) s to m else m to s
         if (waitingSince == 0L) {
-            if (!playing.playWhenReady || playing.currentPosition < b - 12) return
+            if (!playing.playWhenReady || playing.currentPosition < b - 25) return
         }
         if (parkedAtA(parked)) {
             waitingSince = 0L

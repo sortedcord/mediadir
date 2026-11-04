@@ -245,7 +245,7 @@ class PlayerActivity : ComponentActivity(), GestureLayer.Listener {
             setCompoundDrawablesRelative(compoundDrawablesRelative[0], null, null, null)
             background = GradientDrawable().apply { cornerRadius = 18 * d; setColor(0x55000000) }
             setPadding(dp(12), dp(7), dp(14), dp(7))
-            setOnClickListener { showQualityDialog() }
+            setOnClickListener { showSettingsMenu() }
         }
         topBar = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL
@@ -535,7 +535,7 @@ class PlayerActivity : ComponentActivity(), GestureLayer.Listener {
         ).joinToString("  ·  ")
         subView.visibility = if (subView.text.isNullOrEmpty()) View.GONE else View.VISIBLE
         qualityBtn.text = f?.let { (if (i in manual) "" else "Auto · ") + (if (it.h > 0) "${it.h}p" else it.label.ifBlank { "Audio" }) } ?: "Auto"
-        qualityBtn.visibility = if (e.files.size > 1) View.VISIBLE else View.GONE
+        qualityBtn.visibility = View.VISIBLE
         if (audio) view.showController()
         if (::playBtn.isInitialized) updateGhostButtons()
     }
@@ -587,6 +587,27 @@ class PlayerActivity : ComponentActivity(), GestureLayer.Listener {
                 else -> "  (original)"
             }
         return head + "\n" + parts.joinToString(" · ")
+    }
+
+    /** Gear menu: Quality (when there is a choice) and the whole-item Loop video toggle. */
+    private fun showSettingsMenu() {
+        val canQuality = (queue.getOrNull(currentIndex())?.files?.size ?: 0) > 1
+        val labels = mutableListOf<String>()
+        if (canQuality) labels += "Quality"
+        labels += "Loop video: " + (if (settings.loopVideo) "On" else "Off")
+        AlertDialog.Builder(this, android.R.style.Theme_DeviceDefault_Dialog_Alert)
+            .setTitle("Settings")
+            .setItems(labels.toTypedArray()) { _, which ->
+                if (canQuality && which == 0) showQualityDialog() else toggleLoopVideo()
+            }
+            .show()
+    }
+
+    private fun toggleLoopVideo() {
+        val on = !settings.loopVideo
+        settings.loopVideo = on
+        player?.repeatMode = if (on) Player.REPEAT_MODE_ONE else Player.REPEAT_MODE_OFF
+        showHint(if (on) "Loop video on" else "Loop video off")
     }
 
     private fun showQualityDialog() {
@@ -827,12 +848,12 @@ class PlayerActivity : ComponentActivity(), GestureLayer.Listener {
                 .setExceedVideoConstraintsIfNecessary(true))
         }
         return ExoPlayer.Builder(this, renderers)
-            .setMediaSourceFactory(DefaultMediaSourceFactory(http))
+            .setMediaSourceFactory(DefaultMediaSourceFactory(MediaCache.wrap(this, http)))
             .setLoadControl(load)
             .setTrackSelector(selector)
             .setSeekBackIncrementMs(10_000).setSeekForwardIncrementMs(10_000)
             .setHandleAudioBecomingNoisy(true)
-            .build()
+            .build().also { it.setSeekParameters(androidx.media3.exoplayer.SeekParameters.EXACT) }
     }
 
     private fun build() {
@@ -869,6 +890,8 @@ class PlayerActivity : ComponentActivity(), GestureLayer.Listener {
                 Toast.makeText(this@PlayerActivity, "Playback error: ${error.errorCodeName}", Toast.LENGTH_LONG).show()
             }
             override fun onMediaItemTransition(mediaItem: MediaItem?, reason: Int) {
+                // Whole-item repeat: same item restarting; keep A/B loop, HQ state etc. untouched.
+                if (reason == Player.MEDIA_ITEM_TRANSITION_REASON_REPEAT) { seekOverlay.clear(); dropHq(); return }
                 if (reason == Player.MEDIA_ITEM_TRANSITION_REASON_AUTO) {
                     val prev = queue.getOrNull(p.currentMediaItemIndex - 1)
                     val cur = queue.getOrNull(p.currentMediaItemIndex)
@@ -899,6 +922,7 @@ class PlayerActivity : ComponentActivity(), GestureLayer.Listener {
                 }
             }
         })
+        p.repeatMode = if (settings.loopVideo) Player.REPEAT_MODE_ONE else Player.REPEAT_MODE_OFF
         p.playWhenReady = true
         p.prepare()
         view.player = loop.wrap(p)

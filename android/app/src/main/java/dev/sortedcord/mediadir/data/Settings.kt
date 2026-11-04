@@ -26,6 +26,11 @@ class Settings(ctx: Context) {
         get() = prefs.getInt("hq_pause_delay_ms", 1200)
         set(v) = prefs.edit().putInt("hq_pause_delay_ms", v).apply()
 
+    /** Repeat the current item (REPEAT_MODE_ONE); an active A-B loop takes precedence inside its range. */
+    var loopVideo: Boolean
+        get() = prefs.getBoolean("loop_video", false)
+        set(v) = prefs.edit().putBoolean("loop_video", v).apply()
+
     /** Stable random per-install id, generated on first use. */
     val deviceId: String
         get() = prefs.getString("device_id", null)?.takeIf { it.isNotBlank() }
