@@ -50,6 +50,14 @@ impl Repo<'_> {
         Ok(self.conn.query_row(&format!("SELECT {COLS} FROM media_files WHERE hash = ?1"), [hash], row_to_file).optional()?)
     }
 
+    /// A symlinked file with this quick fingerprint (kept after the full hash replaced `fp:<hex>`).
+    pub fn find_file_by_fingerprint(&self, fp: &str) -> AppResult<Option<MediaFile>> {
+        Ok(self
+            .conn
+            .query_row(&format!("SELECT {COLS} FROM media_files WHERE fingerprint = ?1 ORDER BY added_at, id LIMIT 1"), [fp], row_to_file)
+            .optional()?)
+    }
+
     /// Files of an item, ordered by height desc.
     pub fn files_for_item(&self, item_id: &str) -> AppResult<Vec<MediaFile>> {
         let mut st = self.conn.prepare(&format!("SELECT {COLS} FROM media_files WHERE item_id = ?1"))?;

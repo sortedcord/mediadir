@@ -1346,6 +1346,32 @@ def main():
         assert os.listdir(ing).count("Dangling Film (2010).mkv") == 1
     check("rename placement: symlink (abs/relative/dangling), hardlink, Range, frame, lazy hash path, verify, delete keeps target", t_symlink)
 
+    def t_retry():
+        ing = state["ingest_dir"]
+        dlink = os.path.join(ing, "Dangling Film (2010).mkv")
+        rec = [r for r in get("/api/ingest?state=failed&limit=1000") if r["source"] == dlink][0]
+        # still dangling: the retry is accepted and fails again (new record), the entry stays
+        r = req("POST", f"/api/ingest/{rec['id']}/retry", expect=202)[1]
+        assert r["ok"] and r["id"] == rec["id"] and r["retrying"], r
+        # non-failed record -> 400; unknown -> 404; uploads are not retryable
+        done = [x for x in get("/api/ingest?state=done&limit=5")][0]
+        assert req("POST", f"/api/ingest/{done['id']}/retry")[0] == 400
+        assert req("POST", "/api/ingest/ffffffffffffffff/retry")[0] == 404
+        # fix the link (now points at a real file) and retry everything that failed
+        ext = os.path.join(work, "ext")
+        fixed = os.path.join(ext, "Movies", "Dangling Film (2010).mkv")
+        make_video(fixed, 320, 180, 790)
+        os.remove(dlink)
+        os.symlink(fixed, dlink)
+        n_before = len(get("/api/ingest?limit=1000"))
+        out = req("POST", "/api/ingest/retry-failed", expect=202)[1]
+        assert out["ok"] and out["retried"] >= 1 and "skipped" in out, out
+        it = wait_for(lambda: items(q="Dangling Film")["items"], timeout=40, what="retried link ingested")[0]
+        assert it["title"] == "Dangling Film"
+        assert not os.path.lexists(dlink), "the retried link moved into the store"
+        assert len(get("/api/ingest?limit=1000")) > n_before
+    check("ingest retry: POST /api/ingest/{id}/retry and /api/ingest/retry-failed", t_retry)
+
     shutil.rmtree(work, ignore_errors=True)
     print(f"\n{PASSES} passed, {len(FAILS)} failed")
 

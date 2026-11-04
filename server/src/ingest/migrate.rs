@@ -90,3 +90,75 @@ pub(super) fn migrate_with(repo: &Repo, store: &Store, old_root: Option<&Path>) 
     }
     Ok(migrated)
 }
+
+/// Startup pass over finished ingest records whose symlink is still in INGEST_DIR (it should have
+/// moved into the store). Only ever removes a link inside `ingest_dir`, never a target:
+/// - the file row exists and its store symlink points at the same target: the content is catalogued,
+///   the leftover link is removed;
+/// - the file row is gone: if the same content (fingerprint) is catalogued the record becomes a
+///   `duplicate` of that file and the link stays (like any duplicate); otherwise the record is marked
+///   `failed` and forgotten, so the link is ingested again.
+pub(super) fn reconcile_leftovers(repo: &Repo, store: &Store, ingest_dir: &Path) {
+    match reconcile_with(repo, store, ingest_dir) {
+        Ok(0) => {}
+        Ok(n) => println!("migrate: {n} leftover ingest symlink(s) reconciled"),
+        Err(e) => eprintln!("migrate: leftovers: {e}"),
+    }
+}
+
+pub(super) fn reconcile_with(repo: &Repo, store: &Store, ingest_dir: &Path) -> Result<usize, crate::error::AppError> {
+    let mut n = 0;
+    for (rec_id, source, file_id) in repo.done_ingest_sources()? {
+        let link = PathBuf::from(&source);
+        if !link.starts_with(ingest_dir) || !fs::symlink_metadata(&link).map(|m| m.file_type().is_symlink()).unwrap_or(false) {
+            continue;
+        }
+        let file = match &file_id {
+            Some(id) => repo.find_file(id)?,
+            None => None,
+        };
+        if let Some(f) = file {
+            let entry = store.abs(&f.store_path);
+            let same = fs::symlink_metadata(&entry).map(|m| m.file_type().is_symlink()).unwrap_or(false)
+                && matches!((fs::canonicalize(&entry), fs::canonicalize(&link)), (Ok(a), Ok(b)) if a == b);
+            if same {
+                match fs::remove_file(&link) {
+                    Ok(()) => {
+                        println!("migrate: removed leftover ingest symlink {} (already catalogued)", link.display());
+                        n += 1;
+                    }
+                    Err(e) => eprintln!("migrate: cannot remove leftover ingest symlink {}: {e}", link.display()),
+                }
+            }
+            continue;
+        }
+        // the record points at a file row that no longer exists
+        let mut rec = repo.get_ingest(&rec_id)?;
+        let existing = match fs::canonicalize(&link).ok().and_then(|c| super::store::fingerprint(&c).ok()) {
+            Some((fp, _, _)) => repo.find_file_by_fingerprint(&fp)?,
+            None => None,
+        };
+        match existing {
+            Some(e) => {
+                println!("migrate: record {} ({}) points at a missing file; now a duplicate of {}", rec_id, rec.name, e.id);
+                rec.state = "duplicate".into();
+                rec.item_id = Some(e.item_id);
+                rec.file_id = Some(e.id);
+                rec.error = None;
+            }
+            None => {
+                println!("migrate: record {} ({}) points at a missing file and the content is not catalogued; marked failed for retry", rec_id, rec.name);
+                rec.state = "failed".into();
+                rec.error = Some("file row is gone; the symlink is still in INGEST_DIR (retry to ingest it again)".into());
+                rec.item_id = None;
+                rec.file_id = None;
+                if let Some(k) = super::stat_key(&link) {
+                    repo.forget_seen(k.dev, k.ino)?;
+                }
+            }
+        }
+        repo.save_ingest(&rec)?;
+        n += 1;
+    }
+    Ok(n)
+}

@@ -19,6 +19,8 @@ pub fn routes() -> Router<Shared> {
         .route("/api/ingest", get(list))
         .route("/api/ingest/status", get(status))
         .route("/api/ingest/scan", post(scan))
+        .route("/api/ingest/retry-failed", post(retry_failed))
+        .route("/api/ingest/{id}/retry", post(retry_one))
         .route("/api/ingest/upload", post(upload).layer(DefaultBodyLimit::disable()))
         .route("/api/ingest/{id}", get(get_one))
         .route("/api/files/{id}", delete(delete_file))
@@ -84,6 +86,21 @@ async fn scan(State(st): State<Shared>) -> AppResult<(StatusCode, Json<serde_jso
     })
     .await??;
     Ok((StatusCode::ACCEPTED, Json(serde_json::json!({ "ok": true, "retrying_failed": retried }))))
+}
+
+/// Retry every failed record whose entry is still in INGEST_DIR.
+async fn retry_failed(State(st): State<Shared>) -> AppResult<(StatusCode, Json<serde_json::Value>)> {
+    let ing = st.ingest.clone();
+    let (retried, skipped) = tokio::task::spawn_blocking(move || ing.retry_failed()).await??;
+    Ok((StatusCode::ACCEPTED, Json(serde_json::json!({ "ok": true, "retried": retried, "skipped": skipped }))))
+}
+
+/// Retry one failed record (404 when its entry left INGEST_DIR, 400 when it is not failed).
+async fn retry_one(State(st): State<Shared>, Path(id): Path<String>) -> AppResult<(StatusCode, Json<serde_json::Value>)> {
+    let ing = st.ingest.clone();
+    let rid = id.clone();
+    tokio::task::spawn_blocking(move || ing.retry_record(&rid)).await??;
+    Ok((StatusCode::ACCEPTED, Json(serde_json::json!({ "ok": true, "id": id, "retrying": true }))))
 }
 
 /// `%XX` decoding for `X-Filename`.

@@ -85,8 +85,14 @@ pub fn attach(repo: &Repo, mapping: &Mapping, f: &StoredFile, now: i64) -> AppRe
                 item
             }
         };
+        let mut id = media_file_id(&f.hash);
+        if r.find_file(&id)?.is_some() {
+            // ids derive from the hash at insert time and outlive it (fp: -> full hash), so a
+            // different file can land on a taken id; never collide
+            id = crate::model::fnv1a(&format!("file\u{0}{}\u{0}{now}", f.hash));
+        }
         let file = MediaFile {
-            id: media_file_id(&f.hash),
+            id,
             item_id: item.id.clone(),
             hash: f.hash.clone(),
             store_path: f.store_path.clone(),

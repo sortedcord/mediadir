@@ -157,6 +157,7 @@ impl Ingest {
             println!("ingest: {n} records interrupted by a restart marked failed");
         }
         migrate::migrate_old_external(&repo, &store, &cfg.ingest_dir);
+        migrate::reconcile_leftovers(&repo, &store, &cfg.ingest_dir);
         let seen = repo.all_seen()?.into_iter().map(|k| ((k.dev, k.ino), (k.size, k.mtime))).collect();
         drop(conn);
         let (tx, rx) = mpsc::unbounded_channel();
@@ -247,6 +248,55 @@ impl Ingest {
             seen.remove(k);
         }
         Ok(keys.len())
+    }
+
+    /// Re-queue one failed ingest-dir record whose entry is still in INGEST_DIR.
+    pub fn retry_record(&self, id: &str) -> AppResult<()> {
+        let rec = {
+            let conn = self.db.conn()?;
+            Repo::new(&conn).get_ingest(id)?
+        };
+        if rec.state != "failed" {
+            return Err(AppError::bad(format!("only failed records can be retried (this one is {})", rec.state)));
+        }
+        self.requeue_source(&rec)
+    }
+
+    fn requeue_source(&self, rec: &IngestRecord) -> AppResult<()> {
+        if rec.origin != "ingest" {
+            return Err(AppError::bad("uploads cannot be retried; upload the file again"));
+        }
+        let path = PathBuf::from(&rec.source);
+        if !path.starts_with(&self.ingest_dir) || std::fs::symlink_metadata(&path).is_err() {
+            return Err(AppError::not_found("file in INGEST_DIR (it is no longer there)"));
+        }
+        if let Some(k) = stat_key(&path) {
+            self.seen.lock().unwrap().remove(&(k.dev, k.ino));
+            let conn = self.db.conn()?;
+            Repo::new(&conn).forget_seen(k.dev, k.ino)?;
+        }
+        self.note(&path);
+        Ok(())
+    }
+
+    /// Re-queue every failed ingest-dir record still present. Returns (retried, skipped).
+    pub fn retry_failed(&self) -> AppResult<(usize, usize)> {
+        let recs = {
+            let conn = self.db.conn()?;
+            Repo::new(&conn).list_ingests(Some("failed"), 1000)?
+        };
+        let (mut retried, mut skipped) = (0, 0);
+        let mut done = HashSet::new();
+        for rec in recs {
+            if !done.insert(rec.source.clone()) {
+                continue;
+            }
+            match self.requeue_source(&rec) {
+                Ok(()) => retried += 1,
+                Err(_) => skipped += 1,
+            }
+        }
+        Ok((retried, skipped))
     }
 
     /// A settled ingest-dir file, on the blocking pool.
@@ -382,7 +432,14 @@ impl Ingest {
             let mut inflight = self.inflight.lock().unwrap();
             if inflight.contains(&hash) {
                 None
-            } else if let Some(existing) = repo.find_file_by_hash(&hash)? {
+            } else if let Some(existing) = match repo.find_file_by_hash(&hash)? {
+                Some(e) => Some(e),
+                // a symlinked file keeps its fingerprint after the lazy hasher swapped in the full hash
+                None => match &reference {
+                    Some(r) => repo.find_file_by_fingerprint(&r.fp)?,
+                    None => None,
+                },
+            } {
                 rec.item_id = Some(existing.item_id);
                 rec.file_id = Some(existing.id);
                 None
@@ -760,6 +817,158 @@ mod tests {
         assert_eq!(std::fs::metadata(ext.join("Movies")).unwrap().permissions().mode() & 0o777, 0o555);
         drop(conn);
         std::fs::set_permissions(ext.join("Movies"), std::fs::Permissions::from_mode(0o755)).unwrap();
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    fn run_file(ing: &Arc<Ingest>, path: &Path) -> IngestRecord {
+        run_link(ing, path)
+    }
+
+    #[test]
+    fn same_content_after_lazy_hash_is_a_duplicate_not_an_id_collision() {
+        let (root, ext, ing) = setup_ext("lazydup");
+        let target = ext.join("Movies/Lazy Dup (2012).mkv");
+        make_media(&target, true, 2);
+        let copy = ext.join("Movies/Lazy Dup copy.mkv");
+        std::fs::copy(&target, &copy).unwrap();
+        let regular = ing.ingest_dir.join("Lazy Dup regular.mkv");
+        std::fs::create_dir_all(&ing.ingest_dir).unwrap();
+        std::fs::copy(&target, &regular).unwrap();
+
+        let la = ing.ingest_dir.join("Lazy Dup (2012).mkv");
+        std::os::unix::fs::symlink(&target, &la).unwrap();
+        let ra = run_link(&ing, &la);
+        assert_eq!(ra.state, "done", "{:?}", ra.error);
+        assert!(matches!(ing.hash_one_pending(&[]).unwrap(), lazy::Step::Done));
+        let conn = ing.db.conn().unwrap();
+        let repo = Repo::new(&conn);
+        let fa = repo.get_file(ra.file_id.as_ref().unwrap()).unwrap();
+        assert_eq!(fa.hash_state, "full");
+
+        // another symlink to identical bytes (different path): its fp: matches the fingerprint column
+        let lb = ing.ingest_dir.join("Lazy Dup again.mkv");
+        std::os::unix::fs::symlink(&copy, &lb).unwrap();
+        let rb = run_link(&ing, &lb);
+        assert_eq!(rb.state, "duplicate", "{:?}", rb.error);
+        assert_eq!((rb.file_id.as_deref(), rb.item_id.as_deref()), (Some(fa.id.as_str()), Some(fa.item_id.as_str())));
+        assert!(std::fs::symlink_metadata(&lb).is_ok(), "duplicates stay in the ingest dir");
+        // a regular file with the same bytes: full hash matches the lazily hashed row
+        let rc = run_file(&ing, &regular);
+        assert_eq!(rc.state, "duplicate", "{:?}", rc.error);
+        assert_eq!(rc.file_id.as_deref(), Some(fa.id.as_str()));
+        assert_eq!(repo.file_count().unwrap(), 1);
+        drop(conn);
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn lazy_hash_collision_repoints_every_record() {
+        let (root, ext, ing) = setup_ext("lazycol");
+        let target = ext.join("Movies/Col (2013).mkv");
+        make_media(&target, true, 1);
+        let regular = ing.ingest_dir.join("Col regular (2013).mkv");
+        std::fs::create_dir_all(&ing.ingest_dir).unwrap();
+        std::fs::copy(&target, &regular).unwrap();
+        let la = ing.ingest_dir.join("Col (2013).mkv");
+        std::os::unix::fs::symlink(&target, &la).unwrap();
+        let ra = run_link(&ing, &la); // pending row A
+        let lb = ing.ingest_dir.join("Col dup.mkv");
+        std::os::unix::fs::symlink(&target, &lb).unwrap();
+        let rb = run_link(&ing, &lb); // duplicate of A (fingerprint)
+        assert_eq!((ra.state.as_str(), rb.state.as_str()), ("done", "duplicate"));
+        let rc = run_file(&ing, &regular); // same bytes as a regular file: its own row (A is still fp:)
+        assert_eq!(rc.state, "done", "{:?}", rc.error);
+        assert_ne!(ra.file_id, rc.file_id);
+
+        assert!(matches!(ing.hash_one_pending(&[]).unwrap(), lazy::Step::Done));
+        let conn = ing.db.conn().unwrap();
+        let repo = Repo::new(&conn);
+        assert!(repo.find_file(ra.file_id.as_ref().unwrap()).unwrap().is_none(), "the symlinked row was dropped");
+        assert_eq!(repo.file_count().unwrap(), 1);
+        for id in [&ra.id, &rb.id] {
+            let r = repo.get_ingest(id).unwrap();
+            assert_eq!(r.state, "duplicate", "record {id}");
+            assert_eq!(r.file_id, rc.file_id);
+            assert_eq!(r.item_id, rc.item_id);
+        }
+        drop(conn);
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn leftover_ingest_symlinks_are_reconciled() {
+        let (root, ext, ing) = setup_ext("leftover");
+        let target = ext.join("Movies/Left (2014).mkv");
+        make_media(&target, true, 1);
+        let link = ing.ingest_dir.join("Left (2014).mkv");
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+        let r = run_link(&ing, &link);
+        assert_eq!(r.state, "done", "{:?}", r.error);
+        let conn = ing.db.conn().unwrap();
+        let repo = Repo::new(&conn);
+
+        // 1) row exists and its store symlink has the same target: the leftover link goes, the target stays
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+        assert_eq!(migrate::reconcile_with(&repo, &ing.store, &ing.ingest_dir).unwrap(), 1);
+        assert!(std::fs::symlink_metadata(&link).is_err() && target.exists());
+        assert_eq!(repo.get_ingest(&r.id).unwrap().state, "done");
+
+        // 2) the row is gone and the content is not catalogued: record failed, link stays for a retry
+        ing.delete_file(r.file_id.as_ref().unwrap()).unwrap();
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+        assert_eq!(migrate::reconcile_with(&repo, &ing.store, &ing.ingest_dir).unwrap(), 1);
+        let rec = repo.get_ingest(&r.id).unwrap();
+        assert_eq!((rec.state.as_str(), rec.file_id.clone()), ("failed", None));
+        assert!(std::fs::symlink_metadata(&link).is_ok());
+        assert_eq!(repo.file_count().unwrap(), 0);
+
+        // 3) the row is gone but the same content is catalogued elsewhere: duplicate of it, link stays
+        let other = ing.ingest_dir.join("Other Left (2014).mkv");
+        std::fs::copy(&target, &other).unwrap();
+        let ro = run_file(&ing, &other);
+        assert_eq!(ro.state, "done", "{:?}", ro.error);
+        let mut back = rec.clone();
+        back.state = "done".into();
+        back.file_id = Some("0000000000000000".into()); // a row that no longer exists
+        // the regular copy has a full hash and no fingerprint, so catalogue a fingerprinted (symlinked) row too
+        let lo = ing.ingest_dir.join("Left Ref (2014).mkv");
+        std::os::unix::fs::symlink(&target, &lo).unwrap();
+        let rl = run_link(&ing, &lo);
+        assert!(rl.state == "done" || rl.state == "duplicate", "{:?}", rl.error);
+        repo.save_ingest(&back).unwrap();
+        std::os::unix::fs::symlink(&target, &link).ok();
+        assert_eq!(migrate::reconcile_with(&repo, &ing.store, &ing.ingest_dir).unwrap(), 1);
+        let dup = repo.get_ingest(&r.id).unwrap();
+        assert_eq!((dup.state.as_str(), dup.file_id), ("duplicate", rl.file_id.clone()));
+        assert!(std::fs::symlink_metadata(&link).is_ok(), "link of a duplicate stays");
+        assert!(target.exists());
+        drop(conn);
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn failed_records_can_be_retried() {
+        let (root, ext, ing) = setup_ext("retry");
+        let l = ing.ingest_dir.join("later.mkv");
+        std::fs::create_dir_all(&ing.ingest_dir).unwrap();
+        std::os::unix::fs::symlink(ext.join("nope.mkv"), &l).unwrap();
+        let r = run_link(&ing, &l);
+        assert_eq!(r.state, "failed");
+        let key = stat_key(&l).unwrap();
+        ing.remember(&key, &l, &r);
+        assert!(ing.is_seen(&key));
+        ing.retry_record(&r.id).unwrap();
+        assert!(!ing.is_seen(&key), "forgotten");
+        assert_eq!(ing.status().settling, 1, "re-queued for the settle wait");
+        // not failed -> 400; entry gone -> 404
+        let mut ok = ing.new_record("ingest", l.to_string_lossy().into(), "later.mkv".into(), None);
+        ok.state = "done".into();
+        ing.save(&ok);
+        assert!(matches!(ing.retry_record(&ok.id), Err(AppError::BadRequest(_))));
+        assert_eq!(ing.retry_failed().unwrap(), (1, 0));
+        std::fs::remove_file(&l).unwrap();
+        assert!(matches!(ing.retry_record(&r.id), Err(AppError::NotFound(_))));
+        assert_eq!(ing.retry_failed().unwrap(), (0, 1));
         std::fs::remove_dir_all(&root).unwrap();
     }
 

@@ -123,7 +123,15 @@ ln -s /mnt/sdb1/Movies/Some.Film.2012.mkv "$INGEST_DIR/"      # the link's name 
   A link with a **relative** target is re-created in the store with the absolute, canonical target (so it still
   resolves from there) and the ingest entry is removed. Then the usual pipeline: settle → identify → ffprobe → name → item.
 - **Failures** (`state: failed`, nothing catalogued, entry left in `INGEST_DIR`, not retried until you fix it and
-  `POST /api/ingest/scan`): a dangling link, a target that is not a regular file.
+  `POST /api/ingest/scan`, `POST /api/ingest/{id}/retry` or `POST /api/ingest/retry-failed`): a dangling link,
+  a target that is not a regular file.
+- **Duplicates by fingerprint.** A link is a duplicate when its `fp:` matches a row's hash *or* its `fingerprint`
+  column (kept after the lazy hash replaced `hash`); file ids derive from the hash at insert time, so they never
+  change and a colliding id is replaced by a fresh one. When the lazy hash finds an existing file with the same
+  content, the symlinked row is dropped and all its ingest records become `duplicate` of the surviving file.
+- **Leftovers.** At startup, finished records whose symlink is still in `INGEST_DIR` are reconciled: file row and
+  store symlink present → leftover link removed (target untouched); file row gone → record becomes `duplicate`
+  (content catalogued) or `failed` (retryable).
 - **Row.** `media_files` has `location` (`store` | `external`; `external` = the store entry is a symlink),
   `hash_state` (`full` | `pending`), `fingerprint` and `src_mtime` (added by an idempotent startup migration).
   `store_path` is relative to `MEDIA_DIR` like any other file.
@@ -206,6 +214,7 @@ Creating/deleting libraries is gone (405).
 | GET | `/api/ingest` | recent ingest records, `?state=` filter, newest first |
 | GET 
 | POST | `/api/ingest/scan` | force a poll of the ingest dir |
+| POST | `/api/ingest/{id}/retry` · `/api/ingest/retry-failed` | retry failed record(s) whose entry is still in `INGEST_DIR` |
 | POST | `/api/ingest/upload` | upload (see above) |
 | DELETE | `/api/items/{id}` | delete item + unreferenced blobs |
 | DELETE | `/api/files/{id}` | delete one file/version |

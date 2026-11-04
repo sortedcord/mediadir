@@ -190,6 +190,8 @@ All JSON. Errors: non-2xx with `{ "error": "message" }`.
 | GET | `/api/ingest` · `/api/ingest/{id}` | *v3:* ingest records ([STORAGE.md](STORAGE.md)) |
 | GET | `/api/ingest/status` | *v3:* watcher/queue/task status, plus `pending_hashes` (symlinked files still awaiting their full hash). `problems[].problem` is `missing`, `corrupt` or `changed` |
 | POST | `/api/ingest/scan` | *v3:* force a poll of the ingest dir, 202 |
+| POST | `/api/ingest/{id}/retry` | *v3:* retry one `failed` ingest-dir record: forgets its seen entry and re-queues the entry still in `INGEST_DIR`. `202 {ok, id, retrying}`; `400` if the record is not `failed` or is an upload; `404` if the entry is no longer in `INGEST_DIR` |
+| POST | `/api/ingest/retry-failed` | *v3:* same for every failed record whose entry is still in `INGEST_DIR` → `202 {ok, retried, skipped}` (`skipped` = entry gone / upload) |
 | POST | `/api/ingest/upload` | *v3:* raw body + `X-Filename` |
 | GET | `/api/relations` | *v3:* `type, q, limit=50, offset=0` → `{total, relations:[RelationSummary]}` |
 | GET | `/api/relation-types` | `[{type, count}]` for types in use |

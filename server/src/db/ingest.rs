@@ -129,6 +129,19 @@ impl Repo<'_> {
         Ok(())
     }
 
+    /// Forget one file (by inode) so the next poll processes it again.
+    pub fn forget_seen(&self, dev: u64, ino: u64) -> AppResult<()> {
+        self.conn.execute("DELETE FROM seen_files WHERE dev = ?1 AND ino = ?2", params![dev as i64, ino as i64])?;
+        Ok(())
+    }
+
+    /// `(record id, source, file_id)` of finished ingest-dir records.
+    pub fn done_ingest_sources(&self) -> AppResult<Vec<(String, String, Option<String>)>> {
+        let mut st = self.conn.prepare("SELECT id, source, file_id FROM ingests WHERE origin = 'ingest' AND state = 'done'")?;
+        let rows = st.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?.collect::<Result<Vec<_>, _>>()?;
+        Ok(rows)
+    }
+
     /// Forget failed files so the next poll retries them. Returns the forgotten keys.
     pub fn forget_failed_seen(&self) -> AppResult<Vec<(u64, u64)>> {
         let mut st = self.conn.prepare("SELECT dev, ino FROM seen_files WHERE state = 'failed'")?;
