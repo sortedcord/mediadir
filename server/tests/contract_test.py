@@ -748,9 +748,15 @@ def main():
         assert f2["label"] == "Mood!" and f2["display"]["placement"] == "info" and f2["display"]["color"] == "#112233"
         fps = req("PUT", "/api/fields/fps", {"display": {"color": "#00FF00"}}, expect=200)[1]
         assert fps["display"]["color"] == "#00FF00"
-        assert req("PUT", "/api/fields/fps", {"applies_to": ["movie"]})[0] == 400
-        req("PUT", "/api/fields/fps", {"display": {"color": "#FF4D6D"}}, expect=200)
-        assert req("DELETE", "/api/fields/fps")[0] == 400
+        assert req("PUT", "/api/fields/fps", {"applies_to": ["bogus"]})[0] == 400
+        fps = req("PUT", "/api/fields/fps", {"applies_to": ["movie"]}, expect=200)[1]
+        assert fps["applies_to"] == ["movie"] and fps["builtin"], fps
+        assert [f for f in get("/api/fields") if f["key"] == "fps"][0]["applies_to"] == ["movie"]
+        mvd = get(f"/api/items/{mv['id']}")
+        assert not [b for b in mvd["display"] if b["key"] == "fps"], "excluded kind not presented"
+        fps = req("DELETE", "/api/fields/fps", expect=200)[1]
+        assert fps["builtin"] and fps["applies_to"] == ["movie", "episode", "music_video", "video"], fps
+        assert fps["display"]["color"] == "#FF4D6D", fps
         req("DELETE", f"/api/fields/{key}", expect=200)
         d = get(f"/api/items/{mv['id']}")
         assert key not in d["fields"] and key not in [f["key"] for f in get("/api/fields")]

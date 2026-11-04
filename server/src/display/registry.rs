@@ -84,8 +84,9 @@ impl FieldRegistry {
         let mut defs = Self::builtin_definitions();
         for s in stored {
             if let Some(b) = defs.iter_mut().find(|d| d.key == s.key) {
-                // builtins: only label/display are overridable
+                // builtins: label/display/applies_to are overridable
                 b.label = s.label;
+                b.applies_to = s.applies_to;
                 b.display = s.display;
             } else if !s.builtin {
                 defs.push(FieldDefinition { builtin: false, derived: false, ..s });
@@ -105,5 +106,24 @@ impl FieldRegistry {
 
     pub fn get(&self, key: &str) -> Option<&FieldDefinition> {
         self.defs.iter().find(|d| d.key == key)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn builtin_applies_to_override_is_honoured() {
+        let mut o = FieldRegistry::builtin_definitions().into_iter().find(|d| d.key == "studio").unwrap();
+        assert!(o.applies("movie") && !o.applies("episode"));
+        o.applies_to = vec!["episode".into()];
+        let reg = FieldRegistry::from_parts(vec![o]);
+        let d = reg.get("studio").unwrap();
+        assert!(d.builtin && d.applies("episode") && !d.applies("movie"));
+        o = d.clone();
+        o.applies_to = vec![];
+        let reg = FieldRegistry::from_parts(vec![o]);
+        assert!(reg.get("studio").unwrap().applies("movie"), "[] = all kinds");
     }
 }

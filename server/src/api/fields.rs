@@ -141,9 +141,6 @@ async fn update(State(st): State<Shared>, Path(key): Path<String>, JsonBody(b): 
                     def.label = l;
                 }
                 if let Some(a) = b.applies_to {
-                    if def.builtin {
-                        return Err(AppError::bad("applies_to of builtin fields cannot be changed"));
-                    }
                     validate_applies(&a)?;
                     def.applies_to = a;
                 }
@@ -160,7 +157,10 @@ async fn remove(State(st): State<Shared>, Path(key): Path<String>) -> AppResult<
     st.db
         .call(move |r| {
             if FieldRegistry::is_builtin(&key) {
-                return Err(AppError::bad("builtin fields cannot be deleted (set display.placement to hidden instead)"));
+                // builtins cannot be deleted: DELETE resets the stored override to defaults
+                r.delete_field_def(&key)?;
+                let def = FieldRegistry::load(r)?.get(&key).cloned().ok_or_else(|| AppError::not_found("field"))?;
+                return Ok(serde_json::to_value(def)?);
             }
             if !r.stored_fields()?.iter().any(|s| s.def.key == key) {
                 return Err(AppError::not_found(format!("field '{key}'")));
@@ -168,8 +168,9 @@ async fn remove(State(st): State<Shared>, Path(key): Path<String>) -> AppResult<
             r.tx(|r| {
                 r.delete_field_def(&key)?;
                 r.remove_field_everywhere(&key)
-            })
+            })?;
+            Ok(serde_json::to_value(ok().0)?)
         })
-        .await?;
-    Ok(ok())
+        .await
+        .map(Json)
 }

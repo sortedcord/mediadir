@@ -3,7 +3,7 @@ use crate::error::AppResult;
 use crate::model::{DisplaySpec, FieldDefinition, FieldType};
 use rusqlite::params;
 
-/// A stored field definition: a custom definition, or an override of a builtin's label/display.
+/// A stored field definition: a custom definition, or an override of a builtin's label/display/applies_to.
 #[derive(Debug, Clone)]
 pub struct StoredField {
     pub def: FieldDefinition,

@@ -180,8 +180,8 @@ All JSON. Errors: non-2xx with `{ "error": "message" }`.
 | DELETE | `/api/people/{id}` | removes person + credits |
 | GET | `/api/fields` | `[FieldDefinition]` (builtin + custom, sorted by order) |
 | POST | `/api/fields` | custom def `{key, label, type, applies_to, display}` |
-| PUT | `/api/fields/{key}` | update `label, applies_to, display` (builtins: display/label only) |
-| DELETE | `/api/fields/{key}` | custom only (also deletes values) |
+| DELETE | `/api/fields/{key}` | custom: deletes the field and its values → `{ok:true}`. Builtin: resets the label/display/applies_to override to defaults → the default FieldDefinition |
+| PUT | `/api/fields/{key}` | update `label, applies_to, display` (builtins too: the override is stored and `GET /api/fields` returns the effective `label`/`display`/`applies_to`; `[]` = all kinds, same as custom fields). Values already stored on items of a kind that is now excluded are kept but no longer presented; clients should not offer the field for that kind |
 | GET | `/api/search` | `q` → `{ "items": [ItemSummary], "people": [Person] }` |
 | GET/HEAD | `/stream/{file_id}` | original bytes, Range/206 |
 | POST | `/api/assets` | *v3:* upload an image, raw body → `{hash, mime, width, height, size}` (see [Images](#images-v3)) |
